@@ -64,8 +64,8 @@ TARGETS = [
 ]
 
 TRAIN_START = 2006
-TRAIN_END   = 2022   # train through 2022; 2023-2024 = val for more robust Optuna signal
-VAL_START   = 2023
+TRAIN_END   = 2023   # train through 2023; 2024 = val only; 2025 = test
+VAL_START   = 2024
 VAL_END     = 2024
 TEST_YEAR   = 2025
 
@@ -98,7 +98,7 @@ print("="*60)
 
 # Split sets for distribution analysis
 train = qb[qb["season"] <= TRAIN_END].copy()
-val   = qb[qb["season"].between(VAL_START, VAL_END)].copy()   # 2023-2024
+val   = qb[qb["season"].between(VAL_START, VAL_END)].copy()   # 2024
 test  = qb[qb["season"] == TEST_YEAR].copy()                  # 2025
 
 print(f"\nSet sizes:  train={len(train):,}  val={len(val):,}  test={len(test):,}")
@@ -246,62 +246,62 @@ print("="*60)
 QB_FEATURES = [
     # --- Identity / context ---
     "depth_chart_rank",
-    "age",
     "games_played_current_season",
     "week",
+    "season",
 
-    # --- Rolling passing volume: all 4 windows (user override) ---
-    *[f"passing_yards_L{w}" for w in [3, 5, 10, 20]],
+    # --- Rolling passing volume ---
+    # removed: passing_yards_L3 (too noisy)
+    *[f"passing_yards_L{w}"   for w in [5, 10, 20]],
+    *[f"passing_yards_ewm{w}" for w in [5, 10, 20]],
 
-    # --- Rolling passing rate stats ---
-    # dropped: td_rate, int_rate (noisy proxies; EPA captures them)
-    # dropped: qb_scramble_rate (captured by rushing_yards_L20)
-    *[f"yards_per_attempt_L{w}"        for w in [5, 10, 20]],
-    "completion_pct_L20",
-    *[f"epa_per_dropback_L{w}"         for w in [5, 10, 20]],
-    "qb_cpoe_L5", "qb_cpoe_L20",
-    *[f"qb_air_yards_per_attempt_L{w}" for w in [5, 10, 20]],
-    *[f"qb_pressure_rate_L{w}"         for w in [3, 10, 20]],
-    *[f"epa_per_opportunity_L{w}"      for w in [5, 10, 20]],
+    # --- QB rate stats: EWM only (L-windows removed as redundant) ---
+    # removed: yards_per_attempt L5/L10/L20, completion_pct_L20 (ewm covers)
+    # removed: epa_per_dropback L5/L10/L20 (ewm covers)
+    # removed: qb_cpoe_L20 (ewm covers), qb_pressure_rate L3/L10/L20 (ewm covers)
+    # removed: qb_air_yards_per_attempt L5/L10/L20 (ewm covers)
+    *[f"yards_per_attempt_ewm{w}"        for w in [5, 10, 20]],
+    "completion_pct_ewm20",
+    *[f"epa_per_dropback_ewm{w}"         for w in [5, 10, 20]],
+    "qb_cpoe_L5",
+    *[f"qb_cpoe_ewm{w}"                  for w in [5, 20]],
+    *[f"qb_air_yards_per_attempt_ewm{w}" for w in [5, 10, 20]],
+    *[f"qb_pressure_rate_ewm{w}"         for w in [5, 10, 20]],
+    *[f"epa_per_opportunity_ewm{w}"      for w in [5, 10, 20]],
 
-    # --- Rushing: L20 only (dual-threat ID + passing-volume trade-off) ---
+    # --- Rushing ---
     "rushing_yards_L20",
+    "rushing_yards_ewm20",
 
-    # --- NGS: all 4 windows (user override; NaN pre-2016 handled natively) ---
-    *[f"ngs_avg_time_to_throw_L{w}"        for w in [3, 5, 10, 20]],
-    *[f"ngs_avg_intended_air_yards_L{w}"   for w in [3, 5, 10, 20]],
-    *[f"ngs_aggressiveness_L{w}"           for w in [3, 5, 10, 20]],
-    *[f"ngs_completion_pct_above_exp_L{w}" for w in [3, 5, 10, 20]],
+    # --- NGS: L5/L10/L20 only (L3 removed across all NGS stats) ---
+    *[f"ngs_avg_time_to_throw_L{w}"        for w in [5, 10, 20]],
+    *[f"ngs_avg_intended_air_yards_L{w}"   for w in [5, 10, 20]],
+    *[f"ngs_aggressiveness_L{w}"           for w in [5, 10, 20]],
+    *[f"ngs_completion_pct_above_exp_L{w}" for w in [5, 10, 20]],
 
     # --- Own offense quality ---
-    # dropped: off_rb_epa_per_carry, off_rb_yards_per_carry (run game ≠ pass yards)
-    # dropped: off_wr_epa_per_target, off_wr_racr (collinear with WOPR/off_epa)
-    # dropped: off_te_target_share (captured by off_te_epa_per_target)
     "off_epa_per_play_L5", "off_epa_per_play_L20",
     "off_pass_rate_L5",
     *[f"off_rb_receiving_yards_L{w}" for w in [5, 10, 20]],
     "off_wr_wopr_L5",
     "off_wr_adot_L5",
     "off_te_epa_per_target_L5",
-    "off_te_yprr_L5",            # yards per route run — best single TE efficiency metric
-    "off_te_route_run_rate_L5",  # TE scheme involvement in pass game
+    "off_te_yprr_L5",
+    "off_te_route_run_rate_L5",
 
     # --- Opponent defense quality ---
-    # dropped: opp_def_qb_td_rate (noisy proxy; EPA covers it)
-    # dropped: opp_def_team_epa_per_rush (rush D quality irrelevant to passing yards)
     "opp_def_qb_qb_epa_per_attempt_L5", "opp_def_qb_qb_epa_per_attempt_L20",
     "opp_def_qb_qb_cpoe_L5",
     "opp_def_team_team_epa_per_pass_L5",
 
     # --- Game environment ---
-    # dropped: is_turf, stadium_altitude
+    # removed: age (collinear with season + games_played), rest_days_opponent (lowest SHAP)
     "game_location",
     "is_dome",
     "game_temp",
     "game_wind",
     "game_precip_mm",
     "rest_days",
-    "rest_days_opponent",
 ]
 
 # Keep only columns that actually exist in the dataset
@@ -527,7 +527,7 @@ TWEEDIE_POWER = {
 # --- 3.0  Minimum attempts filter ---
 # Remove mop-up / garbage-time appearances with < 10 pass attempts.
 # Mean passing yards for <10 attempts is ~14 yds — pure noise for projection purposes.
-MIN_ATTEMPTS = 10
+MIN_ATTEMPTS = 15
 before = len(qb)
 qb = qb[qb["attempts"] >= MIN_ATTEMPTS].copy()
 print(f"\nAttempts filter (>= {MIN_ATTEMPTS}): {before:,} -> {len(qb):,} rows  "
@@ -597,8 +597,11 @@ for stat, spans in EWMA_STATS.items():
         )
         ewm_cols_added.append(col)
 
-FEATURE_COLS = FEATURE_COLS + ewm_cols_added
-print(f"\n  EWMA features added: {len(ewm_cols_added)}  ->  {ewm_cols_added}")
+# Only add ewm cols that are not already in FEATURE_COLS (avoids duplicates
+# when ewm features are explicitly listed in QB_FEATURES above)
+_new_ewm = [c for c in ewm_cols_added if c not in FEATURE_COLS]
+FEATURE_COLS = FEATURE_COLS + _new_ewm
+print(f"\n  EWMA cols computed: {len(ewm_cols_added)}  |  new to FEATURE_COLS: {len(_new_ewm)}")
 print(f"  FEATURE_COLS total before null filter: {len(FEATURE_COLS)}")
 
 # %%
@@ -647,6 +650,18 @@ else:
     print("Leakage check passed — no post-game columns in feature set.")
 
 print(f"Final feature count after leakage check: {len(FEATURE_COLS)}")
+
+# Deduplicate FEATURE_COLS (preserves order, keeps first occurrence)
+_seen = set()
+_deduped = []
+for _f in FEATURE_COLS:
+    if _f not in _seen:
+        _deduped.append(_f)
+        _seen.add(_f)
+if len(_deduped) < len(FEATURE_COLS):
+    print(f"  WARNING: removed {len(FEATURE_COLS) - len(_deduped)} duplicate feature(s) from FEATURE_COLS")
+FEATURE_COLS = _deduped
+print(f"  Unique features: {len(FEATURE_COLS)}")
 
 # %%
 # =============================================================================
@@ -751,6 +766,7 @@ prep = {
     "Y_train":        Y_train,
     "Y_val":          Y_val,
     "Y_test":         Y_test,
+    "df_train":       df_train,       # needed for rolling CV splits in Phase 5
     "sample_weights": sample_weights,
     "feature_cols":   FEATURE_COLS,
     "targets":        TARGETS,
@@ -803,10 +819,10 @@ for col in FEATURE_COLS:
     if col not in val_2024.columns or col not in test_2025.columns:
         continue
 
-    v_null = val_2024[col].isna().mean() * 100
-    t_null = test_2025[col].isna().mean() * 100
-    v_mean = val_2024[col].mean()
-    t_mean = test_2025[col].mean()
+    v_null = float(val_2024[col].isna().mean() * 100)
+    t_null = float(test_2025[col].isna().mean() * 100)
+    v_mean = float(val_2024[col].mean())
+    t_mean = float(test_2025[col].mean())
 
     flag_parts = []
 
@@ -815,12 +831,12 @@ for col in FEATURE_COLS:
         flag_parts.append(f"NULL+{t_null - v_null:.0f}%")
 
     # Flag: mean shifted by more than 1 std of the val distribution
-    v_std = val_2024[col].std()
+    v_std = float(val_2024[col].std())
     if v_std > 0 and abs(t_mean - v_mean) > 1.5 * v_std:
         flag_parts.append(f"MEAN_SHIFT {(t_mean - v_mean)/v_std:+.1f}sd")
 
     # Flag: 2025 is entirely NaN (data missing completely)
-    if t_null == 100:
+    if float(t_null) == 100.0:
         flag_parts.append("ALL_NULL_2025")
 
     flag_str = " | ".join(flag_parts)
@@ -998,6 +1014,20 @@ for tgt in TARGETS:
     ridge_models[tgt] = (scaler, ridge)
     print(f"  {tgt:<25}  MAE={m['MAE']:.3f}  RMSE={m['RMSE']:.3f}  R2={m['R2']:+.3f}  Bias={m['Bias']:+.3f}")
 
+    # Print all coefficients sorted by absolute magnitude
+    coef_df = (
+        pd.DataFrame({"feature": FEATURE_COLS, "coefficient": ridge.coef_})
+        .reindex(pd.Series(ridge.coef_).abs().sort_values(ascending=False).index)
+        .reset_index(drop=True)
+    )
+    coef_df.index = range(1, len(coef_df) + 1)
+    print(f"\n  Ridge coefficients — {tgt} (standardized, sorted by |coef|):")
+    print(f"  {'Rank':<5} {'Feature':<45} {'Coefficient':>12}")
+    print(f"  {'-'*65}")
+    for rank, row in coef_df.iterrows():
+        print(f"  {rank:<5} {row['feature']:<45} {row['coefficient']:>+12.4f}")
+    print()
+
 df_b4 = pd.DataFrame(records)
 
 # %%
@@ -1073,22 +1103,30 @@ print(f"  Best baselines saved. Ridge R2s are the floor LightGBM must beat in Ph
 
 # %%
 # =============================================================================
-# PHASE 5  —  LightGBM: passing_yards
+# PHASE 5  —  LightGBM: rolling forward CV + Optuna + final model
 # =============================================================================
 #
 # ACTIVE_TARGET controls which model this block trains.
 # To train the next target, change ACTIVE_TARGET and re-run phases 5-7.
 #
-# DESIGN (same for all targets):
-#   - Optuna TPE, 60 trials, 10 hyperparameters.
-#   - Objective locked per target (regression / poisson / tweedie).
-#   - Val metric for Optuna: MAE on 2024 val set.
-#   - early_stopping_rounds=50 per trial; 100 for final cv refit.
-#   - Final refit on train+val, n_trees scaled by data size ratio.
-#   - Labels clipped to >=0 for poisson/tweedie objectives.
+# DESIGN:
+#   Rolling forward CV folds:
+#     Fold 1:  train 2006-2016, val 2017
+#     Fold 2:  train 2006-2017, val 2018
+#     ...
+#     Fold 7:  train 2006-2022, val 2023   <- Optuna tuning fold
+#   Optuna (60 trials, TPE): tunes on the last CV fold (train 2006-2022, val 2023).
+#     Val 2024 is NEVER seen during hyperparameter search.
+#   OOF predictions: collected across all folds (2017-2023) using best_params.
+#   Final model: train 2006-2023 with best_params; n_trees = mean best_iteration
+#     from CV folds. Val 2024 = honest holdout. Test 2025 = true held-out.
+#   Labels clipped to >=0 for poisson/tweedie objectives.
 # =============================================================================
 
 ACTIVE_TARGET = "passing_yards"
+
+OOF_FIRST_VAL_YEAR = 2017   # first val year; train fold = 2006-2016
+OPTUNA_TUNE_YEAR   = 2023   # Optuna tunes on this val year (last CV fold)
 
 print("\n" + "="*60)
 print(f"PHASE 5  --  LightGBM: {ACTIVE_TARGET}")
@@ -1124,6 +1162,13 @@ except NameError:
     TWEEDIE_POWER  = prep["tweedie_power"]
 
 try:
+    df_train
+except NameError:
+    PREP_DIR = DATA_DIR / "data" / "model_prep"
+    _prep2 = joblib.load(PREP_DIR / "qb_model_prep.pkl")
+    df_train = _prep2["df_train"]
+
+try:
     df_all
 except NameError:
     PREP_DIR = DATA_DIR / "data" / "model_prep"
@@ -1141,11 +1186,13 @@ if registry_path.exists():
     optuna_studies  = _reg.get("optuna_studies", {})
     phase5_records  = _reg.get("df_phase5", pd.DataFrame()).to_dict("records")
     best_params_all = _reg.get("best_params",    {})
+    oof_store       = _reg.get("oof_store",       {})
 else:
     lgb_models      = {}
     optuna_studies  = {}
     phase5_records  = []
     best_params_all = {}
+    oof_store       = {}
 
 # %%
 # --- 5.1  Helpers ---
@@ -1213,19 +1260,35 @@ def _make_objective(target, dtrain, dval, X_va, Y_va, objective, tweedie_power=N
     return objective_fn
 
 
+def _cv_split(df_full, val_year, feature_cols, targets):
+    """Return (X_tr, Y_tr, sw_tr, X_va, Y_va) for a single CV fold."""
+    tr_mask = df_full["season"] < val_year
+    va_mask = df_full["season"] == val_year
+    X_tr = df_full.loc[tr_mask, feature_cols].reset_index(drop=True)
+    Y_tr = df_full.loc[tr_mask, targets].reset_index(drop=True)
+    X_va = df_full.loc[va_mask, feature_cols].reset_index(drop=True)
+    Y_va = df_full.loc[va_mask, targets].reset_index(drop=True)
+    sw   = make_sample_weights(df_full.loc[tr_mask, "season"])
+    return X_tr, Y_tr, sw, X_va, Y_va
+
+
 # %%
-# --- 5.2  Train active target ---
+# --- 5.2  Optuna: tune on last CV fold (train 2006-2022, val 2023) ---
 
 tgt = ACTIVE_TARGET
 obj = LOSS_FUNCTIONS[tgt]
 tp  = TWEEDIE_POWER.get(tgt, None)
+_clip = obj in ("tweedie", "poisson")
 
 print(f"\n  target={tgt}  objective={obj}"
       + (f"  tweedie_power={tp}" if tp else ""))
+print(f"  Optuna tuning fold: train 2006-{OPTUNA_TUNE_YEAR - 1}, val {OPTUNA_TUNE_YEAR}")
 
-_clip = obj in ("tweedie", "poisson")
-dtrain, dval = _make_lgb_datasets(
-    X_train, Y_train[tgt], X_val, Y_val[tgt], sample_weights, clip_labels=_clip
+_Xtr_opt, _Ytr_opt, _sw_opt, _Xva_opt, _Yva_opt = _cv_split(
+    df_train, OPTUNA_TUNE_YEAR, FEATURE_COLS, TARGETS
+)
+_dtrain_opt, _dval_opt = _make_lgb_datasets(
+    _Xtr_opt, _Ytr_opt[tgt], _Xva_opt, _Yva_opt[tgt], _sw_opt, clip_labels=_clip
 )
 
 N_TRIALS = 60
@@ -1235,7 +1298,7 @@ study = optuna.create_study(
 )
 _progress = _OptunaProgress(N_TRIALS, tgt)
 study.optimize(
-    _make_objective(tgt, dtrain, dval, X_val, Y_val, obj, tp),
+    _make_objective(tgt, _dtrain_opt, _dval_opt, _Xva_opt, _Yva_opt, obj, tp),
     n_trials=N_TRIALS,
     show_progress_bar=False,
     callbacks=[_progress],
@@ -1247,7 +1310,9 @@ print(f"\n  Optuna best MAE: {study.best_value:.4f}  (trial {study.best_trial.nu
 print(f"  Best params: {best_params}")
 
 # %%
-# --- 5.3  Final refit ---
+# --- 5.3  Rolling forward CV with best_params -> OOF predictions ---
+
+cv_val_years = list(range(OOF_FIRST_VAL_YEAR, TRAIN_END + 1))   # 2017..2023
 
 final_params = {
     "verbosity": -1,
@@ -1261,57 +1326,110 @@ final_params = {
 if tp is not None:
     final_params["tweedie_variance_power"] = tp
 
-# Step 1: cv refit on train-only to find best_iteration (honest val metrics)
-booster_cv = lgb.train(
-    final_params, dtrain,
-    num_boost_round=2000,
-    valid_sets=[dval],
-    callbacks=[
-        early_stopping(stopping_rounds=100, verbose=False),
-        log_evaluation(period=-1),
-    ],
-)
-best_n = booster_cv.best_iteration
-X_full = pd.concat([X_train, X_val], ignore_index=True)
-Y_full = pd.concat([Y_train, Y_val], ignore_index=True)
-sw_val_rows   = np.ones(len(X_val))
-sw_full       = np.concatenate([sample_weights, sw_val_rows])
-scale_ratio   = len(X_full) / len(X_train)
-n_trees_final = max(best_n, int(best_n * scale_ratio))
-print(f"\n  best_iteration={best_n}  ->  n_trees_final={n_trees_final}")
+print(f"\n  Rolling forward CV: {len(cv_val_years)} folds  ({cv_val_years[0]}-{cv_val_years[-1]})")
 
-# Step 2: refit on train+val, fixed n_trees
-_label_full = np.clip(Y_full[tgt].values.astype(float), 0, None) if _clip else Y_full[tgt].values
-dtrain_full = lgb.Dataset(X_full, label=_label_full, weight=sw_full, free_raw_data=False)
+oof_actual = []
+oof_pred   = []
+oof_years  = []
+best_iters = []
+
+for _yr in cv_val_years:
+    _Xtr, _Ytr, _sw, _Xva, _Yva = _cv_split(df_train, _yr, FEATURE_COLS, TARGETS)
+    _dt, _dv = _make_lgb_datasets(_Xtr, _Ytr[tgt], _Xva, _Yva[tgt], _sw, clip_labels=_clip)
+
+    _b = lgb.train(
+        final_params, _dt,
+        num_boost_round=2000,
+        valid_sets=[_dv],
+        callbacks=[
+            early_stopping(stopping_rounds=100, verbose=False),
+            log_evaluation(period=-1),
+        ],
+    )
+    _p = np.clip(_b.predict(_Xva), 0, None)
+
+    oof_actual.extend(_Yva[tgt].tolist())
+    oof_pred.extend(_p.tolist())
+    oof_years.extend([_yr] * len(_Yva))
+    best_iters.append(_b.best_iteration)
+    print(f"    fold val={_yr}  n_train={len(_Xtr):,}  n_val={len(_Xva):,}  "
+          f"best_iter={_b.best_iteration}  "
+          f"MAE={mean_absolute_error(_Yva[tgt], _p):.3f}")
+
+oof_actual = np.array(oof_actual)
+oof_pred   = np.array(oof_pred)
+oof_years  = np.array(oof_years)
+mean_best_iter = int(np.mean(best_iters))
+print(f"\n  Mean best_iteration across folds: {mean_best_iter}")
+
+# %%
+# --- 5.4  OOF metrics: per-year + overall ---
+
+print("\n" + "="*60)
+print(f"OOF METRICS (rolling forward CV)  --  {tgt}")
+print("="*60)
+print(f"  {'Year':<6}  {'N':>5}  {'MAE':>8}  {'RMSE':>8}  {'R2':>8}  {'Bias':>8}")
+print(f"  {'-'*52}")
+
+for _yr in cv_val_years:
+    _mask = oof_years == _yr
+    _m    = _metrics(oof_actual[_mask], oof_pred[_mask], "OOF")
+    print(f"  {_yr:<6}  {_mask.sum():>5}  "
+          f"{_m['MAE']:>8.2f}  {_m['RMSE']:>8.2f}  {_m['R2']:>+8.3f}  {_m['Bias']:>+8.2f}")
+
+_m_overall = _metrics(oof_actual, oof_pred, "OOF-Overall")
+print(f"  {'-'*52}")
+print(f"  {'TOTAL':<6}  {len(oof_actual):>5}  "
+      f"{_m_overall['MAE']:>8.2f}  {_m_overall['RMSE']:>8.2f}  "
+      f"{_m_overall['R2']:>+8.3f}  {_m_overall['Bias']:>+8.2f}")
+
+# %%
+# --- 5.5  Final model: train 2006-2023, n_trees = mean best_iter, validate on 2024 ---
+
+print(f"\n  Final model: train 2006-{TRAIN_END}, n_trees={mean_best_iter}")
+
+_label_tr = np.clip(Y_train[tgt].values.astype(float), 0, None) if _clip else Y_train[tgt].values
+dtrain_final = lgb.Dataset(X_train, label=_label_tr, weight=sample_weights, free_raw_data=False)
+
 booster_final = lgb.train(
     {**final_params, "metric": "none"},
-    dtrain_full,
-    num_boost_round=n_trees_final,
+    dtrain_final,
+    num_boost_round=mean_best_iter,
     callbacks=[log_evaluation(period=-1)],
 )
 
-# Val metrics from cv booster (never saw val during training)
-preds_val = np.clip(booster_cv.predict(X_val), 0, None)
+# Honest val 2024 metrics (never seen during tuning or CV)
+preds_val = np.clip(booster_final.predict(X_val), 0, None)
 m = _metrics(Y_val[tgt], preds_val, "LightGBM")
-m["target"]        = tgt
-m["n_trees_cv"]    = best_n
-m["n_trees_final"] = n_trees_final
-print(f"  Val -> MAE={m['MAE']:.3f}  RMSE={m['RMSE']:.3f}  R2={m['R2']:+.3f}  Bias={m['Bias']:+.3f}")
+m["target"]         = tgt
+m["n_trees"]        = mean_best_iter
+m["oof_mae"]        = float(_m_overall["MAE"])
+m["oof_r2"]         = float(_m_overall["R2"])
+print(f"  Val 2024 -> MAE={m['MAE']:.3f}  RMSE={m['RMSE']:.3f}  R2={m['R2']:+.3f}  Bias={m['Bias']:+.3f}")
+
+# booster_cv alias for Phase 6 compatibility
+booster_cv = booster_final
 
 # %%
-# --- 5.4  Save to registry ---
+# --- 5.6  Save to registry ---
 
 phase5_records = [r for r in phase5_records if r.get("target") != tgt]
 phase5_records.append(m)
 lgb_models[tgt]      = booster_final
 optuna_studies[tgt]  = study
 best_params_all[tgt] = best_params
+oof_store[tgt] = {
+    "oof_actual": oof_actual,
+    "oof_pred":   oof_pred,
+    "oof_years":  oof_years,
+}
 
 joblib.dump({
     "lgb_models":     lgb_models,
     "optuna_studies": optuna_studies,
     "df_phase5":      pd.DataFrame(phase5_records),
     "best_params":    best_params_all,
+    "oof_store":      oof_store,
     "feature_cols":   FEATURE_COLS,
     "targets":        TARGETS,
     "loss_functions": LOSS_FUNCTIONS,
@@ -1321,22 +1439,23 @@ print(f"\n  Registry saved: {registry_path}")
 print(f"  Models in registry: {list(lgb_models.keys())}")
 
 # %%
-# --- 5.5  Summary vs baseline ---
+# --- 5.7  Summary vs baseline ---
 
 print("\n" + "="*60)
-print(f"PHASE 5 SUMMARY -- {tgt} vs baselines (val 2024)")
+print(f"PHASE 5 SUMMARY -- {tgt}")
 print("="*60)
 
 ridge_row = df_all[(df_all["baseline"] == "Ridge") & (df_all["target"] == tgt)].iloc[0]
-print(f"  {'Metric':<10}  {'LightGBM':>10}  {'Ridge':>10}  {'Delta':>10}")
+print(f"  {'Metric':<10}  {'LGB OOF':>10}  {'LGB Val24':>10}  {'Ridge Val24':>12}")
 for metric in ["MAE", "RMSE", "R2"]:
-    lgb_val   = m[metric]
-    ridge_val = ridge_row[metric]
-    delta     = ridge_val - lgb_val if metric != "R2" else lgb_val - ridge_val
-    sign      = "+" if delta > 0 else ""
-    print(f"  {metric:<10}  {lgb_val:>10.3f}  {ridge_val:>10.3f}  {sign}{delta:>9.3f}")
+    lgb_oof  = float(_m_overall[metric])
+    lgb_val  = m[metric]
+    rdg_val  = ridge_row[metric]
+    print(f"  {metric:<10}  {lgb_oof:>10.3f}  {lgb_val:>10.3f}  {rdg_val:>12.3f}")
 
 print(f"\nPhase 5 complete for [{tgt}].")
+print(f"  OOF covers {cv_val_years[0]}-{cv_val_years[-1]}  ({len(cv_val_years)} folds)")
+print(f"  Val 2024 is a clean holdout — never used in tuning or CV.")
 
 # %%
 # =============================================================================
