@@ -250,34 +250,40 @@ QB_FEATURES = [
     "week",
     "season",
 
+    # --- Fantasy points history (elite QB prior) ---
+    "fantasy_pts_ewm10",
+    "fantasy_pts_ewm20",
+    "fantasy_pts_per_game_career",
+    "passing_yards_per_game_career",
+    "passing_yards_career_vs_recent",
+
     # --- Rolling passing volume ---
     # removed: passing_yards_L3 (too noisy)
     *[f"passing_yards_L{w}"   for w in [5, 10, 20]],
     *[f"passing_yards_ewm{w}" for w in [5, 10, 20]],
 
-    # --- QB rate stats: EWM only (L-windows removed as redundant) ---
-    # removed: yards_per_attempt L5/L10/L20, completion_pct_L20 (ewm covers)
-    # removed: epa_per_dropback L5/L10/L20 (ewm covers)
-    # removed: qb_cpoe_L20 (ewm covers), qb_pressure_rate L3/L10/L20 (ewm covers)
-    # removed: qb_air_yards_per_attempt L5/L10/L20 (ewm covers)
+    # --- QB rate stats ---
+    # removed: completion_pct_ewm20 (low SHAP; completion rate ignores yds/attempt, redundant with EPA)
+    # removed: qb_cpoe_L5, qb_cpoe_ewm5/20 (low SHAP; redundant with epa_per_dropback/epa_per_opportunity)
+    # removed: qb_pressure_rate_ewm5/10/20 (low SHAP; predicts sacks/turnovers not yards)
+    # removed: qb_air_yards_per_attempt_ewm5 (low SHAP; ewm10/20 sufficient)
+    # removed: epa_per_dropback_ewm5 (low SHAP; ewm10/20 sufficient)
     *[f"yards_per_attempt_ewm{w}"        for w in [5, 10, 20]],
-    "completion_pct_ewm20",
-    *[f"epa_per_dropback_ewm{w}"         for w in [5, 10, 20]],
-    "qb_cpoe_L5",
-    *[f"qb_cpoe_ewm{w}"                  for w in [5, 20]],
-    *[f"qb_air_yards_per_attempt_ewm{w}" for w in [5, 10, 20]],
-    *[f"qb_pressure_rate_ewm{w}"         for w in [5, 10, 20]],
+    *[f"epa_per_dropback_ewm{w}"         for w in [10, 20]],
+    *[f"qb_air_yards_per_attempt_ewm{w}" for w in [10, 20]],
     *[f"epa_per_opportunity_ewm{w}"      for w in [5, 10, 20]],
 
     # --- Rushing ---
     "rushing_yards_L20",
     "rushing_yards_ewm20",
 
-    # --- NGS: L5/L10/L20 only (L3 removed across all NGS stats) ---
-    *[f"ngs_avg_time_to_throw_L{w}"        for w in [5, 10, 20]],
-    *[f"ngs_avg_intended_air_yards_L{w}"   for w in [5, 10, 20]],
-    *[f"ngs_aggressiveness_L{w}"           for w in [5, 10, 20]],
-    *[f"ngs_completion_pct_above_exp_L{w}" for w in [5, 10, 20]],
+    # --- NGS ---
+    # removed: ngs_avg_time_to_throw_L5/L10 (low SHAP; L20 captures stable style fingerprint)
+    # removed: ngs_avg_intended_air_yards_L5 (low SHAP; L10/L20 sufficient)
+    # removed: ngs_aggressiveness_L5/L10/L20 (low SHAP across all windows; redundant with air yards)
+    # removed: ngs_completion_pct_above_exp_L5/L10/L20 (low SHAP; redundant with EPA features)
+    "ngs_avg_time_to_throw_L20",
+    *[f"ngs_avg_intended_air_yards_L{w}" for w in [10, 20]],
 
     # --- Own offense quality ---
     "off_epa_per_play_L5", "off_epa_per_play_L20",
@@ -304,19 +310,24 @@ QB_FEATURES = [
     "rest_days",
 ]
 
-# Keep only columns that actually exist in the dataset
-QB_FEATURES = [f for f in QB_FEATURES if f in qb.columns]
-print(f"\nCandidate features: {len(QB_FEATURES)}")
+# NOTE: do NOT filter QB_FEATURES against qb.columns here.
+# EWM features (passing_yards_ewm*, epa_per_dropback_ewm*, etc.) are not yet
+# computed at this point — they're added to qb in Phase 3.1b-EWMA.
+# Filtering here would silently drop all EWM features before they exist.
+# The authoritative missing-column check happens in Phase 3.1d, after EWM computation.
+print(f"\nCandidate features (QB_FEATURES): {len(QB_FEATURES)}")
 
-# Null rates across eras
+# Null rates — only check features that already exist in qb.columns (non-EWM)
 print(f"\n{'Feature':<50} {'all%':>6} {'2006-12%':>9} {'2013-15%':>9} {'2016-22%':>9}")
 print("-" * 88)
 era1 = train[train["season"] <= 2012]
 era2 = train[(train["season"] >= 2013) & (train["season"] <= 2015)]
 era3 = train[train["season"] >= 2016]
 
-problem_features = []  # features null >70% in 2016-2022 era
+problem_features = []
 for f in QB_FEATURES:
+    if f not in qb.columns:
+        continue   # EWM cols not yet computed — skip, will be checked in Phase 3.1d
     n_all  = train[f].isna().mean() * 100
     n_e1   = era1[f].isna().mean()  * 100
     n_e2   = era2[f].isna().mean()  * 100
@@ -324,7 +335,7 @@ for f in QB_FEATURES:
     flag   = " <-- HIGH" if n_e3 > 70 else ""
     if n_e3 > 70:
         problem_features.append(f)
-    if n_all > 5 or flag:   # only print non-trivial null rates
+    if n_all > 5 or flag:
         print(f"  {f:<50} {n_all:>5.1f}% {n_e1:>8.1f}% {n_e2:>8.1f}% {n_e3:>8.1f}%{flag}")
 
 if problem_features:
@@ -350,6 +361,8 @@ for t in TARGETS:
     corrs = {}
     y = train_full[t].dropna()
     for f in QB_FEATURES:
+        if f not in train_full.columns:
+            continue   # EWM cols not yet computed at Phase 2 — skipped here, used in Phase 3+
         col = train_full.loc[y.index, f]
         valid = col.notna() & y.notna()
         if valid.sum() < 100:
@@ -514,7 +527,7 @@ LOSS_FUNCTIONS = {
     "passing_yards":      "regression",        # near-normal, skew=-0.27
     "passing_tds":        "poisson",            # count, 33% zeros
     "interceptions":      "poisson",            # count, 51% zeros
-    "rushing_yards":      "tweedie",            # right-skewed continuous, skew=2.55
+    "rushing_yards":      "regression",          # 12.5% negatives — Tweedie invalid (requires y>=0); use MSE
     "rushing_tds":        "poisson",            # 90% zeros
     "fumbles_lost_total": "tweedie",            # 83% zeros, rare event
 }
@@ -569,16 +582,38 @@ else:
 # Team/opponent stats (off_epa_per_play etc.) skipped — no raw per-game column.
 
 EWMA_STATS = {
-    # raw_col               : [spans matching the simple-rolling windows kept above]
-    "passing_yards":          [5, 10, 20],
-    "yards_per_attempt":      [5, 10, 20],
-    "completion_pct":         [20],
-    "epa_per_dropback":       [5, 10, 20],
-    "qb_cpoe":                [5, 20],
+    # ── Passing yards model (existing) ──────────────────────────────────────
+    "passing_yards":            [5, 10, 20],
+    "yards_per_attempt":        [5, 10, 20],
+    "completion_pct":           [20],
+    "epa_per_dropback":         [5, 10, 20],
+    "qb_cpoe":                  [5, 20],
     "qb_air_yards_per_attempt": [5, 10, 20],
-    "qb_pressure_rate":       [5, 10, 20],
-    "epa_per_opportunity":    [5, 10, 20],
-    "rushing_yards":          [20],
+    "qb_pressure_rate":         [5, 10, 20],
+    "epa_per_opportunity":      [5, 10, 20],
+
+    # ── Rushing yards model ──────────────────────────────────────────────────
+    "rushing_yards":            [5, 10, 20],   # extended from [20] only
+    "carries":                  [5, 10, 20],   # carry volume
+    "yards_per_carry":          [5, 10, 20],   # per-carry efficiency
+    "rushing_epa":              [5, 10, 20],   # quality-adjusted rushing value
+    "epa_per_carry":            [5, 10, 20],   # per-carry EPA
+    "qb_scramble_rate":         [5, 10, 20],   # scramble tendency
+
+    # ── Rushing TDs model ────────────────────────────────────────────────────
+    "rushing_tds":              [5, 10, 20],   # TD history EWM
+    # (rushing_yards, carries, epa_per_carry ewm already above)
+
+    # ── Interceptions model ──────────────────────────────────────────────────
+    "interceptions":            [5, 10, 20],   # raw INT count EWM
+    "int_rate":                 [5, 10, 20],   # INT rate EWM (per dropback)
+    "passing_epa":              [5, 10, 20],   # per-game passing EPA EWM
+    "ngs_aggressiveness":       [5, 10, 20],   # throws into tight coverage — most INT-direct NGS stat
+    # (qb_cpoe, qb_pressure_rate, epa_per_dropback ewm already above)
+
+    # ── Fumbles model ────────────────────────────────────────────────────────
+    "fumbles_lost_total":       [5, 10, 20],   # total fumbles lost EWM
+    # (carries, qb_scramble_rate, qb_pressure_rate ewm already above)
 }
 
 # Sort qb chronologically within each player so ewm() sees games in order
@@ -597,11 +632,90 @@ for stat, spans in EWMA_STATS.items():
         )
         ewm_cols_added.append(col)
 
-# Only add ewm cols that are not already in FEATURE_COLS (avoids duplicates
-# when ewm features are explicitly listed in QB_FEATURES above)
-_new_ewm = [c for c in ewm_cols_added if c not in FEATURE_COLS]
-FEATURE_COLS = FEATURE_COLS + _new_ewm
-print(f"\n  EWMA cols computed: {len(ewm_cols_added)}  |  new to FEATURE_COLS: {len(_new_ewm)}")
+# ── Fantasy points composite ─────────────────────────────────────────────────
+# Computed here so EWM windows and career mean are available before QB_FEATURES
+# is locked down in Phase 3.1d.
+# Formula: 0.04*PY + 4*PTD + 0.1*RY + 6*RTD - 2*(INT + FUM)
+# shift(1): strict pre-game info only — no leakage.
+_fpts_raw = (
+    0.04 * qb["passing_yards"].fillna(0)
+    + 4   * qb["passing_tds"].fillna(0)
+    + 0.1 * qb["rushing_yards"].fillna(0)
+    + 6   * qb["rushing_tds"].fillna(0)
+    - 2   * (qb["interceptions"].fillna(0) + qb["fumbles_lost_total"].fillna(0))
+)
+qb["_fantasy_pts_raw"] = _fpts_raw
+
+for _span in [10, 20]:
+    _col = f"fantasy_pts_ewm{_span}"
+    qb[_col] = (
+        qb.groupby("player_id")["_fantasy_pts_raw"]
+        .transform(lambda x, s=_span: x.ewm(span=s, min_periods=2).mean().shift(1))
+    )
+
+# Career mean: expanding mean with min_periods=20; NaN if fewer than 20 prior games
+qb["fantasy_pts_per_game_career"] = (
+    qb.groupby("player_id")["_fantasy_pts_raw"]
+    .transform(lambda x: x.expanding(min_periods=20).mean().shift(1))
+)
+
+qb.drop(columns=["_fantasy_pts_raw"], inplace=True)
+print(f"  Fantasy points features computed: fantasy_pts_ewm10, fantasy_pts_ewm20, fantasy_pts_per_game_career")
+
+# Career per-game stats (expanding mean, min 10 prior games, shift(1) — no leakage)
+_CAREER_STATS = [
+    ('passing_yards',      'passing_yards_per_game_career'),
+    ('passing_tds',        'passing_tds_per_game_career'),
+    ('rushing_yards',      'rushing_yards_per_game_career'),
+    ('rushing_tds',        'rushing_tds_per_game_career'),
+    ('carries',            'carries_per_game_career'),
+    ('rushing_epa',        'rushing_epa_per_game_career'),
+    ('interceptions',      'interceptions_per_game_career'),
+    ('fumbles_lost_total', 'fumbles_lost_per_game_career'),
+]
+for _raw, _col in _CAREER_STATS:
+    if _raw in qb.columns:
+        qb[_col] = (
+            qb.groupby('player_id')[_raw]
+            .transform(lambda x: x.expanding(min_periods=20).mean().shift(1))
+        )
+print(f"  Career per-game stats computed: {[c for _, c in _CAREER_STATS]}")
+
+# Regression-to-mean gap features: career baseline minus current EWM form.
+# Positive gap = QB performing below career level (injury/slump → likely rebound).
+# Gives the model a direct signal to identify injury-year bouncebacks.
+if 'rushing_yards_per_game_career' in qb.columns and 'rushing_yards_ewm20' in qb.columns:
+    qb['rushing_yards_career_vs_recent'] = (
+        qb['rushing_yards_per_game_career'] - qb['rushing_yards_ewm20']
+    )
+if 'carries_per_game_career' in qb.columns and 'carries_ewm20' in qb.columns:
+    qb['carries_career_vs_recent'] = (
+        qb['carries_per_game_career'] - qb['carries_ewm20']
+    )
+if 'rushing_epa_per_game_career' in qb.columns and 'rushing_epa_ewm20' in qb.columns:
+    qb['rushing_epa_career_vs_recent'] = (
+        qb['rushing_epa_per_game_career'] - qb['rushing_epa_ewm20']
+    )
+if 'passing_yards_per_game_career' in qb.columns and 'passing_yards_ewm20' in qb.columns:
+    qb['passing_yards_career_vs_recent'] = (
+        qb['passing_yards_per_game_career'] - qb['passing_yards_ewm20']
+    )
+if 'passing_tds_per_game_career' in qb.columns and 'passing_tds_L20' in qb.columns:
+    qb['passing_tds_career_vs_recent'] = (
+        qb['passing_tds_per_game_career'] - qb['passing_tds_L20']
+    )
+print("  Gap features computed: rushing_yards_career_vs_recent, carries_career_vs_recent, "
+      "rushing_epa_career_vs_recent, passing_yards_career_vs_recent, passing_tds_career_vs_recent")
+
+# EWM columns are computed above for the full dataframe so future position models
+# can reference them directly. QB_FEATURES is the authoritative list — do NOT
+# auto-append EWM cols here. Any EWM col wanted in the QB model must be
+# explicitly listed in QB_FEATURES above.
+_ewm_in_features = [c for c in ewm_cols_added if c in FEATURE_COLS]
+_ewm_computed_only = [c for c in ewm_cols_added if c not in FEATURE_COLS]
+print(f"\n  EWMA cols computed: {len(ewm_cols_added)}")
+print(f"    Used in QB model (in QB_FEATURES): {len(_ewm_in_features)}")
+print(f"    Computed only (available for other models): {len(_ewm_computed_only)}")
 print(f"  FEATURE_COLS total before null filter: {len(FEATURE_COLS)}")
 
 # %%
@@ -1561,10 +1675,12 @@ print(f"\n  Saved: {fig_path.name}")
 
 from scipy.stats import gaussian_kde, norm as sp_norm
 
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+_oof_resid_py = np.array(oof_pred) - np.array(oof_actual)
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 for ax, (split, yt, yp) in zip(axes, [
-    ("Val 2024",  Y_val[tgt].values,  preds_val_p6),
-    ("Test 2025", Y_test[tgt].values, preds_test_p6),
+    ("Val 2024",    Y_val[tgt].values,    preds_val_p6),
+    ("Test 2025",   Y_test[tgt].values,   preds_test_p6),
+    ("OOF 2017-23", np.array(oof_actual), np.array(oof_pred)),
 ]):
     resid = yp - yt
     ax.hist(resid, bins=40, color="#1f77b4", alpha=0.55, density=True, edgecolor="none")
@@ -1654,10 +1770,10 @@ except Exception as e:
 
 # %%
 # --- 6.6  Export 2025 test predictions to Excel ---
-# Columns: player_display_name, week, depth_chart_rank, actual, predicted
+# Columns: player_display_name, week, attempts, depth_chart_rank, actual, predicted
 preds_test_p6 = np.clip(booster_final.predict(X_test), 0, None)
 
-_export_df = df_test[["player_display_name", "week", "depth_chart_rank"]].copy().reset_index(drop=True)
+_export_df = df_test[["player_display_name", "week", "attempts", "depth_chart_rank"]].copy().reset_index(drop=True)
 _export_df["actual_passing_yards"]    = Y_test[tgt].values
 _export_df["predicted_passing_yards"] = preds_test_p6
 _export_df["residual"]                = _export_df["predicted_passing_yards"] - _export_df["actual_passing_yards"]
@@ -1896,3 +2012,4071 @@ for _, row in _szn.iterrows():
 _szn_path = DATA_DIR / f"test_predictions_2025_{tgt}_season_totals.xlsx"
 _szn.to_excel(_szn_path, index=False)
 print(f"\n  Season totals saved: {_szn_path.name}")
+
+
+# %%
+# =============================================================================
+# =============================================================================
+# PASSING TDs MODEL
+# =============================================================================
+# =============================================================================
+
+# %%
+# =============================================================================
+# TD-PHASE 4  —  BASELINES: passing_tds
+# =============================================================================
+# Baselines for passing_tds only. Ridge prints full coefficients.
+# All data (qb, df_train, df_val, df_test, X_train etc.) already in memory
+# from Phase 3 of the passing_yards model above.
+# TD_FEATURES is the full broad feature set — all QB-relevant rolling windows,
+# NGS, team context, game environment. SHAP will determine what matters here.
+# =============================================================================
+
+print("\n" + "="*70)
+print("PASSING TDs MODEL")
+print("="*70)
+
+# %%
+# --- TD Feature set: full broad set ---
+# All QB-relevant columns available in the dataset.
+# Start wide; use SHAP to prune in subsequent iteration.
+
+TD_FEATURES = [
+    # Identity / context
+    "depth_chart_rank", "week",
+
+    # Fantasy points history (elite QB prior)
+    "fantasy_pts_ewm10",
+    "fantasy_pts_ewm20",
+    "fantasy_pts_per_game_career",
+    "passing_tds_per_game_career",
+    "passing_tds_career_vs_recent",
+
+    # Passing volume — L20 + ewm20 only (L10/ewm10 cut: middle window redundant)
+    "passing_yards_L20",
+    "passing_yards_ewm20",
+
+    # TD history — L5/L10/L20; td_rate L10/L20 (L5 cut: lowest SHAP of trio)
+    *[f"passing_tds_L{w}" for w in [5, 10, 20]],
+    "td_rate_L10", "td_rate_L20",
+
+    # EPA efficiency — epa_per_opportunity ewm20; epa_per_dropback all cut (overlap)
+    # passing_epa L5 (short-term) + L20 (long-term); L10 cut
+    "epa_per_opportunity_ewm20",
+    "passing_epa_L5", "passing_epa_L20",
+
+    # Completion accuracy — ewm20 level; raw L5/L10/L20 cut (redundant with CPOE + yards/EPA)
+    "completion_pct_ewm20",
+
+    # INT rate — L5 only (L10/L20 cut: redundant, low SHAP)
+    "int_rate_L5",
+
+    # Air yards — vertical tendency (ewm20 only)
+    "qb_air_yards_per_attempt_ewm20",
+
+    # Rushing TDs — mobile QB signal
+    "rushing_tds_L20",
+
+    # NGS — accuracy above expectation L5/L20; intended air yards L20
+    "ngs_avg_intended_air_yards_L20",
+    "ngs_completion_pct_above_exp_L5",
+    "ngs_completion_pct_above_exp_L20",
+
+    # Own offense — L5/L20 only (L10 cut); WR target share
+    "off_epa_per_play_L5", "off_epa_per_play_L20",
+    "off_pass_rate_L5", "off_pass_rate_L20",
+    "off_wr_wopr_L5",
+
+    # Opponent defense — L20 dominant; L5 for td_rate + cpoe (unique signal)
+    # epa_per_attempt L5 cut (L20 dominates); opp_def_team_team cut
+    "opp_def_qb_qb_epa_per_attempt_L20",
+    "opp_def_qb_qb_cpoe_L5",
+    "opp_def_qb_qb_td_rate_L5", "opp_def_qb_qb_td_rate_L20",
+
+    # Game environment
+    "game_location", "is_dome", "game_temp", "game_wind", "game_precip_mm",
+]
+
+# Filter to columns that actually exist after EWM computation
+TD_FEATURES = [f for f in TD_FEATURES if f in qb.columns]
+# Deduplicate preserving order
+_seen_td = set()
+TD_FEATURES = [f for f in TD_FEATURES if not (_seen_td.add(f) or f in _seen_td - {f})]
+# simpler dedup
+_seen_td = set(); _td_deduped = []
+for _f in TD_FEATURES:
+    if _f not in _seen_td:
+        _td_deduped.append(_f); _seen_td.add(_f)
+TD_FEATURES = _td_deduped
+
+print(f"\nTD_FEATURES: {len(TD_FEATURES)} features")
+
+# %%
+# --- Build TD train/val/test splits ---
+
+TD_TARGET = "passing_tds"
+
+X_train_td = df_train[TD_FEATURES].reset_index(drop=True)
+X_val_td   = df_val[TD_FEATURES].reset_index(drop=True)
+X_test_td  = df_test[TD_FEATURES].reset_index(drop=True)
+
+Y_train_td = df_train[[TD_TARGET]].reset_index(drop=True)
+Y_val_td   = df_val[[TD_TARGET]].reset_index(drop=True)
+Y_test_td  = df_test[[TD_TARGET]].reset_index(drop=True)
+
+print(f"  X_train_td: {X_train_td.shape}  X_val_td: {X_val_td.shape}  X_test_td: {X_test_td.shape}")
+
+# %%
+# --- TD-4.1  Global mean baseline ---
+print("\n--- TD-B1: Global mean ---")
+_td_train_mean = float(Y_train_td[TD_TARGET].mean())
+_td_preds_mean = np.full(len(Y_val_td), _td_train_mean)
+_td_b1 = _metrics(Y_val_td[TD_TARGET], _td_preds_mean, "GlobalMean")
+_td_b1["target"] = TD_TARGET
+print(f"  {TD_TARGET:<25}  MAE={_td_b1['MAE']:.3f}  RMSE={_td_b1['RMSE']:.3f}  R2={_td_b1['R2']:+.3f}  Bias={_td_b1['Bias']:+.3f}")
+
+# %%
+# --- TD-4.2  L1-proxy baseline (passing_tds_L3) ---
+print("\n--- TD-B2: L1-proxy (passing_tds_L3) ---")
+_col = "passing_tds_L3"
+if _col in X_val_td.columns:
+    _td_preds_l1 = X_val_td[_col].fillna(_td_train_mean).values
+else:
+    _td_preds_l1 = np.full(len(Y_val_td), _td_train_mean)
+    print(f"  passing_tds_L3 missing — using global mean fallback")
+_td_b2 = _metrics(Y_val_td[TD_TARGET], _td_preds_l1, "L1-proxy")
+_td_b2["target"] = TD_TARGET
+print(f"  {TD_TARGET:<25}  MAE={_td_b2['MAE']:.3f}  RMSE={_td_b2['RMSE']:.3f}  R2={_td_b2['R2']:+.3f}  Bias={_td_b2['Bias']:+.3f}")
+
+# %%
+# --- TD-4.3  Rolling L5 mean baseline ---
+print("\n--- TD-B3: Rolling L5 mean (passing_tds_L5) ---")
+_col = "passing_tds_L5"
+if _col in X_val_td.columns:
+    _td_preds_l5 = X_val_td[_col].fillna(_td_train_mean).values
+else:
+    _td_preds_l5 = np.full(len(Y_val_td), _td_train_mean)
+    print(f"  passing_tds_L5 missing — using global mean fallback")
+_td_b3 = _metrics(Y_val_td[TD_TARGET], _td_preds_l5, "RollingL5")
+_td_b3["target"] = TD_TARGET
+print(f"  {TD_TARGET:<25}  MAE={_td_b3['MAE']:.3f}  RMSE={_td_b3['RMSE']:.3f}  R2={_td_b3['R2']:+.3f}  Bias={_td_b3['Bias']:+.3f}")
+
+# %%
+# --- TD-4.4  Ridge baseline ---
+print("\n--- TD-B4: Ridge regression ---")
+
+from sklearn.linear_model import Ridge
+from sklearn.preprocessing import StandardScaler
+
+_td_col_medians = X_train_td.median().fillna(0)   # fallback 0 for all-NaN cols (pre-NGS era)
+_Xtr_td_r = X_train_td.fillna(_td_col_medians).fillna(0)
+_Xva_td_r = X_val_td.fillna(_td_col_medians).fillna(0)
+
+_td_scaler = StandardScaler()
+_Xtr_td_s  = _td_scaler.fit_transform(_Xtr_td_r)
+_Xva_td_s  = _td_scaler.transform(_Xva_td_r)
+
+_td_ridge = Ridge(alpha=10.0)
+_td_ridge.fit(_Xtr_td_s, Y_train_td[TD_TARGET].values, sample_weight=sample_weights)
+_td_preds_ridge = np.clip(_td_ridge.predict(_Xva_td_s), 0, None)
+
+_td_b4 = _metrics(Y_val_td[TD_TARGET], _td_preds_ridge, "Ridge")
+_td_b4["target"] = TD_TARGET
+print(f"  {TD_TARGET:<25}  MAE={_td_b4['MAE']:.3f}  RMSE={_td_b4['RMSE']:.3f}  R2={_td_b4['R2']:+.3f}  Bias={_td_b4['Bias']:+.3f}")
+
+_td_coef_df = (
+    pd.DataFrame({"feature": TD_FEATURES, "coefficient": _td_ridge.coef_})
+    .assign(abs_coef=lambda d: d["coefficient"].abs())
+    .sort_values("abs_coef", ascending=False)
+    .drop(columns="abs_coef")
+    .reset_index(drop=True)
+)
+_td_coef_df.index = range(1, len(_td_coef_df) + 1)
+print(f"\n  Ridge coefficients — {TD_TARGET} (standardized, sorted by |coef|):")
+print(f"  {'Rank':<5} {'Feature':<50} {'Coefficient':>12}")
+print(f"  {'-'*70}")
+for rank, row in _td_coef_df.iterrows():
+    print(f"  {rank:<5} {row['feature']:<50} {row['coefficient']:>+12.4f}")
+
+# %%
+# --- TD-4.5  Baseline summary ---
+df_td_baselines = pd.DataFrame([_td_b1, _td_b2, _td_b3, _td_b4])
+
+print("\n" + "="*60)
+print(f"TD BASELINE SUMMARY — VAL 2024")
+print("="*60)
+sub = df_td_baselines[["baseline", "MAE", "RMSE", "R2", "Bias"]].set_index("baseline")
+print(sub.to_string(float_format=lambda x: f"{x:+.3f}" if abs(x) < 1000 else f"{x:.3f}"))
+
+# %%
+# =============================================================================
+# TD-PHASE 5  —  LightGBM: passing_tds (Poisson, rolling forward CV + Optuna)
+# =============================================================================
+
+TD_OOF_FIRST_VAL_YEAR = 2017
+TD_OPTUNA_TUNE_YEAR   = 2023
+TD_OBJ                = "poisson"
+TD_CLIP               = True     # clip labels >=0 for poisson
+
+print("\n" + "="*60)
+print(f"TD-PHASE 5  --  LightGBM: {TD_TARGET}")
+print("="*60)
+print(f"  objective={TD_OBJ}  rolling CV: val {TD_OOF_FIRST_VAL_YEAR}-{TD_OPTUNA_TUNE_YEAR}")
+
+# %%
+# --- TD-5.1  Optuna: tune on train 2006-2022, val 2023 ---
+
+_Xtr_opt_td, _Ytr_opt_td, _sw_opt_td, _Xva_opt_td, _Yva_opt_td = _cv_split(
+    df_train, TD_OPTUNA_TUNE_YEAR, TD_FEATURES, [TD_TARGET]
+)
+
+_y_tr_opt_td = np.clip(_Ytr_opt_td[TD_TARGET].values.astype(float), 0, None)
+_y_va_opt_td = np.clip(_Yva_opt_td[TD_TARGET].values.astype(float), 0, None)
+
+_dtrain_opt_td = lgb.Dataset(_Xtr_opt_td, label=_y_tr_opt_td, weight=_sw_opt_td, free_raw_data=False)
+_dval_opt_td   = lgb.Dataset(_Xva_opt_td, label=_y_va_opt_td, reference=_dtrain_opt_td, free_raw_data=False)
+
+def _make_td_objective(dtrain, dval, X_va, Y_va):
+    def objective_fn(trial):
+        params = {
+            "verbosity":         -1,
+            "objective":         TD_OBJ,
+            "metric":            "mae",
+            "num_leaves":        trial.suggest_int("num_leaves", 31, 512),
+            "max_depth":         trial.suggest_int("max_depth", 4, 12),
+            "learning_rate":     trial.suggest_float("learning_rate", 0.005, 0.15, log=True),
+            "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
+            "subsample":         trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree":  trial.suggest_float("colsample_bytree", 0.4, 1.0),
+            "reg_alpha":         trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
+            "reg_lambda":        trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+            "min_split_gain":    trial.suggest_float("min_split_gain", 0.0, 1.0),
+            "extra_trees":       trial.suggest_categorical("extra_trees", [True, False]),
+            "n_jobs": -1, "seed": 42,
+        }
+        _b = lgb.train(
+            params, dtrain,
+            num_boost_round=2000,
+            valid_sets=[dval],
+            callbacks=[early_stopping(50, verbose=False), log_evaluation(-1)],
+        )
+        return mean_absolute_error(Y_va[TD_TARGET], np.clip(_b.predict(X_va), 0, None))
+    return objective_fn
+
+TD_N_TRIALS = 60
+td_study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=42))
+_td_progress = _OptunaProgress(TD_N_TRIALS, TD_TARGET)
+td_study.optimize(
+    _make_td_objective(_dtrain_opt_td, _dval_opt_td, _Xva_opt_td, _Yva_opt_td),
+    n_trials=TD_N_TRIALS,
+    show_progress_bar=False,
+    callbacks=[_td_progress],
+)
+_td_progress.close()
+
+td_best_params = td_study.best_params
+print(f"\n  Optuna best MAE: {td_study.best_value:.4f}  (trial {td_study.best_trial.number}/{TD_N_TRIALS})")
+print(f"  Best params: {td_best_params}")
+
+# %%
+# --- TD-5.2  Rolling forward CV with best_params ---
+
+td_final_params = {
+    "verbosity": -1, "objective": TD_OBJ, "metric": "mae",
+    "n_jobs": -1, "seed": 42,
+    **{k: v for k, v in td_best_params.items() if k != "extra_trees"},
+    "extra_trees": td_best_params["extra_trees"],
+}
+
+td_cv_val_years = list(range(TD_OOF_FIRST_VAL_YEAR, TRAIN_END + 1))
+print(f"\n  Rolling forward CV: {len(td_cv_val_years)} folds  ({td_cv_val_years[0]}-{td_cv_val_years[-1]})")
+
+td_oof_actual = []; td_oof_pred = []; td_oof_years = []; td_best_iters = []
+
+for _yr in td_cv_val_years:
+    _Xtr, _Ytr, _sw, _Xva, _Yva = _cv_split(df_train, _yr, TD_FEATURES, [TD_TARGET])
+    _y_tr = np.clip(_Ytr[TD_TARGET].values.astype(float), 0, None)
+    _y_va = np.clip(_Yva[TD_TARGET].values.astype(float), 0, None)
+    _dt = lgb.Dataset(_Xtr, label=_y_tr, weight=_sw, free_raw_data=False)
+    _dv = lgb.Dataset(_Xva, label=_y_va, reference=_dt, free_raw_data=False)
+    _b = lgb.train(
+        td_final_params, _dt,
+        num_boost_round=2000,
+        valid_sets=[_dv],
+        callbacks=[early_stopping(100, verbose=False), log_evaluation(-1)],
+    )
+    _p = np.clip(_b.predict(_Xva), 0, None)
+    td_oof_actual.extend(_Yva[TD_TARGET].tolist())
+    td_oof_pred.extend(_p.tolist())
+    td_oof_years.extend([_yr] * len(_Yva))
+    td_best_iters.append(_b.best_iteration)
+    print(f"    fold val={_yr}  n_train={len(_Xtr):,}  n_val={len(_Xva):,}  "
+          f"best_iter={_b.best_iteration}  "
+          f"MAE={mean_absolute_error(_Yva[TD_TARGET], _p):.3f}")
+
+td_oof_actual    = np.array(td_oof_actual)
+td_oof_pred      = np.array(td_oof_pred)
+td_oof_years     = np.array(td_oof_years)
+td_mean_best_iter = int(np.mean(td_best_iters))
+print(f"\n  Mean best_iteration across folds: {td_mean_best_iter}")
+
+# %%
+# --- TD-5.3  OOF metrics: per-year + overall ---
+
+print("\n" + "="*60)
+print(f"TD OOF METRICS (rolling forward CV)  --  {TD_TARGET}")
+print("="*60)
+print(f"  {'Year':<6}  {'N':>5}  {'MAE':>8}  {'RMSE':>8}  {'R2':>8}  {'Bias':>8}")
+print(f"  {'-'*52}")
+
+for _yr in td_cv_val_years:
+    _mask = td_oof_years == _yr
+    _m    = _metrics(td_oof_actual[_mask], td_oof_pred[_mask], "OOF")
+    print(f"  {_yr:<6}  {_mask.sum():>5}  "
+          f"{_m['MAE']:>8.3f}  {_m['RMSE']:>8.3f}  {_m['R2']:>+8.3f}  {_m['Bias']:>+8.3f}")
+
+_td_m_overall = _metrics(td_oof_actual, td_oof_pred, "OOF-Overall")
+print(f"  {'-'*52}")
+print(f"  {'TOTAL':<6}  {len(td_oof_actual):>5}  "
+      f"{_td_m_overall['MAE']:>8.3f}  {_td_m_overall['RMSE']:>8.3f}  "
+      f"{_td_m_overall['R2']:>+8.3f}  {_td_m_overall['Bias']:>+8.3f}")
+
+# %%
+# --- TD-5.4  Final model: train 2006-2023, n_trees = mean best_iter ---
+
+print(f"\n  Final TD model: train 2006-{TRAIN_END}, n_trees={td_mean_best_iter}")
+
+_y_tr_full = np.clip(Y_train_td[TD_TARGET].values.astype(float), 0, None)
+_dtrain_td_final = lgb.Dataset(X_train_td, label=_y_tr_full, weight=sample_weights, free_raw_data=False)
+
+td_booster_final = lgb.train(
+    {**td_final_params, "metric": "none"},
+    _dtrain_td_final,
+    num_boost_round=td_mean_best_iter,
+    callbacks=[log_evaluation(-1)],
+)
+
+# Val 2024 honest metrics
+_td_preds_val = np.clip(td_booster_final.predict(X_val_td), 0, None)
+_td_m_val = _metrics(Y_val_td[TD_TARGET], _td_preds_val, "LightGBM")
+print(f"  Val 2024 -> MAE={_td_m_val['MAE']:.3f}  RMSE={_td_m_val['RMSE']:.3f}  "
+      f"R2={_td_m_val['R2']:+.3f}  Bias={_td_m_val['Bias']:+.3f}")
+
+# %%
+# --- TD-5.5  Summary vs baselines ---
+print("\n" + "="*60)
+print(f"TD-PHASE 5 SUMMARY -- {TD_TARGET}")
+print("="*60)
+print(f"  {'Metric':<10}  {'LGB OOF':>10}  {'LGB Val24':>10}  {'Ridge Val24':>12}")
+for metric in ["MAE", "RMSE", "R2"]:
+    print(f"  {metric:<10}  {float(_td_m_overall[metric]):>10.3f}  "
+          f"{_td_m_val[metric]:>10.3f}  {_td_b4[metric]:>12.3f}")
+
+print(f"\nTD-Phase 5 complete.")
+
+# Save to registry
+lgb_models["passing_tds"]      = td_booster_final
+best_params_all["passing_tds"] = td_best_params
+oof_store["passing_tds"] = {
+    "oof_actual": td_oof_actual,
+    "oof_pred":   td_oof_pred,
+    "oof_years":  td_oof_years,
+}
+joblib.dump({
+    "lgb_models":     lgb_models,
+    "optuna_studies": optuna_studies,
+    "df_phase5":      pd.DataFrame(phase5_records),
+    "best_params":    best_params_all,
+    "oof_store":      oof_store,
+    "feature_cols":   FEATURE_COLS,
+    "td_feature_cols": TD_FEATURES,
+    "targets":        TARGETS,
+    "loss_functions": LOSS_FUNCTIONS,
+    "tweedie_power":  TWEEDIE_POWER,
+}, registry_path)
+print(f"  Registry updated.")
+
+# %%
+# =============================================================================
+# TD-PHASE 6  —  EVALUATION & DIAGNOSTICS: passing_tds
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"TD-PHASE 6  --  EVALUATION: {TD_TARGET}")
+print("="*60)
+
+_td_preds_test = np.clip(td_booster_final.predict(X_test_td), 0, None)
+
+# %%
+# --- TD-6.1  Full metrics table ---
+
+print(f"\n  [{TD_TARGET}]")
+for split, yt, yp in [("Val 2024", Y_val_td[TD_TARGET].values, _td_preds_val),
+                       ("Test 2025", Y_test_td[TD_TARGET].values, _td_preds_test)]:
+    fm = _full_metrics(yt, yp)
+    print(f"\n  [{split}]")
+    for k, v in fm.items():
+        print(f"    {k:<15}  {v:>10.4f}")
+
+# %%
+# --- TD-6.2  Predicted vs actual scatter ---
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",  Y_val_td[TD_TARGET].values,  _td_preds_val),
+    ("Test 2025", Y_test_td[TD_TARGET].values, _td_preds_test),
+]):
+    lim = max(yt.max(), yp.max()) * 1.05
+    ax.scatter(yt, yp, alpha=0.25, s=12, color="steelblue", edgecolors="none")
+    ax.plot([0, lim], [0, lim], "r--", lw=1.5, label="Perfect")
+    m_c, b_c = np.polyfit(yt, yp, 1)
+    xs = np.linspace(0, lim, 100)
+    ax.plot(xs, m_c * xs + b_c, "k-", lw=1.2, alpha=0.7, label="OLS fit")
+    r2v   = r2_score(yt, yp)
+    pearr = np.corrcoef(yt, yp)[0, 1]
+    ax.set_title(f"Passing TDs -- {split}\nR2={r2v:.3f}  r={pearr:.3f}",
+                 fontsize=10, fontweight="bold")
+    ax.set_xlabel("Actual TDs", fontsize=9)
+    ax.set_ylabel("Predicted TDs", fontsize=9)
+    ax.legend(fontsize=8)
+    ax.tick_params(labelsize=8)
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{TD_TARGET}_pred_vs_actual.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- TD-6.3  Residual distribution ---
+
+from scipy.stats import gaussian_kde as _gkde, norm as _sp_norm
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",    Y_val_td[TD_TARGET].values,  _td_preds_val),
+    ("Test 2025",   Y_test_td[TD_TARGET].values, _td_preds_test),
+    ("OOF 2017-23", td_oof_actual,               td_oof_pred),
+]):
+    resid = yp - yt
+    ax.hist(resid, bins=40, density=True, color="steelblue", alpha=0.6, edgecolor="white")
+    kde_x = np.linspace(resid.min(), resid.max(), 300)
+    try:
+        ax.plot(kde_x, _gkde(resid)(kde_x), "k-", lw=1.5, label="KDE")
+        ax.plot(kde_x, _sp_norm.pdf(kde_x, resid.mean(), resid.std()), "r--", lw=1.2, alpha=0.8, label="Normal")
+    except Exception:
+        pass
+    ax.axvline(0, color="red", linestyle="--", lw=1.5)
+    ax.set_title(f"Residuals — Passing TDs {split}\nbias={resid.mean():+.3f}  sd={resid.std():.3f}",
+                 fontsize=10, fontweight="bold")
+    ax.set_xlabel("Residual (pred - actual)", fontsize=9)
+    ax.set_ylabel("Density", fontsize=9)
+    ax.legend(fontsize=8)
+    ax.tick_params(labelsize=8)
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{TD_TARGET}_residuals.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- TD-6.4  Calibration curve ---
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",  Y_val_td[TD_TARGET].values,  _td_preds_val),
+    ("Test 2025", Y_test_td[TD_TARGET].values, _td_preds_test),
+]):
+    _cal_df = pd.DataFrame({"actual": yt, "pred": yp})
+    try:
+        _cal_df["decile"] = pd.qcut(_cal_df["pred"], q=10, labels=False, duplicates="drop")
+        _cal_grp = _cal_df.groupby("decile").agg(mean_pred=("pred", "mean"), mean_actual=("actual", "mean"))
+        lim = max(_cal_grp["mean_pred"].max(), _cal_grp["mean_actual"].max()) * 1.2
+        ax.plot(_cal_grp["mean_pred"], _cal_grp["mean_actual"], "o-", color="steelblue", lw=1.5)
+        for _, r in _cal_grp.iterrows():
+            ax.annotate(f"{r.name}", (r["mean_pred"], r["mean_actual"]), fontsize=7,
+                        textcoords="offset points", xytext=(4, 2))
+        ax.plot([0, lim], [0, lim], "r--", lw=1.5, label="Perfect calibration")
+        ax.set_title(f"Passing TDs Calibration -- {split}", fontsize=10, fontweight="bold")
+        ax.set_xlabel("Mean Predicted (decile)", fontsize=9)
+        ax.set_ylabel("Mean Actual", fontsize=9)
+        ax.legend(fontsize=8)
+    except Exception as e:
+        ax.set_title(f"Calibration skipped: {e}")
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{TD_TARGET}_calibration.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- TD-6.5  MAE by week (test 2025) ---
+
+try:
+    _td_week_df = pd.DataFrame({
+        "week":   df_test["week"].values,
+        "actual": Y_test_td[TD_TARGET].values,
+        "pred":   _td_preds_test,
+    })
+    if len(_td_week_df) == len(df_test):
+        _td_wk = (_td_week_df.groupby("week")
+                  .apply(lambda g: mean_absolute_error(g["actual"], g["pred"]))
+                  .reset_index(name="MAE"))
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.bar(_td_wk["week"], _td_wk["MAE"], color="steelblue", edgecolor="white")
+        ax.set_title(f"MAE by Week — Passing TDs (Test 2025)", fontsize=11, fontweight="bold")
+        ax.set_xlabel("NFL Week", fontsize=9)
+        ax.set_ylabel("MAE", fontsize=9)
+        ax.tick_params(labelsize=8)
+        plt.tight_layout()
+        _fig_path = FIG_DIR / f"phase6_{TD_TARGET}_mae_by_week.png"
+        plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+        plt.close()
+        _show(_fig_path)
+        print(f"  Saved: {_fig_path.name}")
+except Exception as e:
+    print(f"  MAE-by-week skipped: {e}")
+
+# %%
+# --- TD-6.6  Export test predictions ---
+
+_td_export_df = df_test[["player_display_name", "week", "attempts", "depth_chart_rank"]].copy().reset_index(drop=True)
+_td_export_df["actual_passing_tds"]    = Y_test_td[TD_TARGET].values
+_td_export_df["predicted_passing_tds"] = _td_preds_test
+_td_export_df["residual"]              = _td_export_df["predicted_passing_tds"] - _td_export_df["actual_passing_tds"]
+_td_export_df = _td_export_df.sort_values(["week", "actual_passing_tds"], ascending=[True, False]).reset_index(drop=True)
+
+_td_export_path = DATA_DIR / f"test_predictions_2025_{TD_TARGET}.xlsx"
+_td_export_df.to_excel(_td_export_path, index=False)
+print(f"\n  2025 test predictions saved: {_td_export_path.name}  ({len(_td_export_df)} rows)")
+
+print(f"\nTD-Phase 6 complete.")
+
+# %%
+# =============================================================================
+# TD-PHASE 7  —  FEATURE IMPORTANCE & SHAP: passing_tds
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"TD-PHASE 7  --  FEATURE IMPORTANCE: {TD_TARGET}")
+print("="*60)
+
+import shap as _shap_lib
+
+# %%
+# --- TD-7.1  LightGBM native gain importance ---
+
+_td_imp_gain = (
+    pd.Series(td_booster_final.feature_importance(importance_type="gain"),
+              index=TD_FEATURES)
+    .sort_values(ascending=False)
+)
+
+fig, ax = plt.subplots(figsize=(10, 8))
+_td_imp_gain.head(25).plot.barh(ax=ax, color="steelblue", edgecolor="white")
+ax.invert_yaxis()
+ax.set_title(f"LightGBM Gain Importance (top 25) — {TD_TARGET}", fontsize=11, fontweight="bold")
+ax.set_xlabel("Total Gain", fontsize=9)
+ax.tick_params(labelsize=8)
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{TD_TARGET}_gain_importance.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- TD-7.2  SHAP ---
+
+_td_sample_idx = np.random.default_rng(42).choice(len(X_test_td), size=min(500, len(X_test_td)), replace=False)
+_td_X_shap     = X_test_td.iloc[_td_sample_idx].reset_index(drop=True)
+
+_td_explainer   = _shap_lib.TreeExplainer(td_booster_final)
+_td_shap_values = _td_explainer.shap_values(_td_X_shap)
+
+_td_mean_abs_shap = pd.Series(
+    np.abs(_td_shap_values).mean(axis=0),
+    index=TD_FEATURES,
+).sort_values(ascending=False)
+
+# Beeswarm
+fig, ax = plt.subplots(figsize=(10, 9))
+_shap_lib.summary_plot(_td_shap_values, _td_X_shap, max_display=20, show=False)
+plt.title(f"SHAP Beeswarm — {TD_TARGET} (top 20)", fontsize=11, fontweight="bold")
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{TD_TARGET}_shap_beeswarm.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# Bar plot
+fig, ax = plt.subplots(figsize=(10, 8))
+_td_mean_abs_shap.head(20).plot.barh(ax=ax, color="darkorange", edgecolor="white")
+ax.invert_yaxis()
+ax.set_title(f"Mean |SHAP| (top 20) — {TD_TARGET}", fontsize=11, fontweight="bold")
+ax.set_xlabel("Mean |SHAP value|", fontsize=9)
+ax.tick_params(labelsize=8)
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{TD_TARGET}_shap_bar.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- TD-7.3  Full importance table (all features) ---
+
+_td_gain_df = _td_imp_gain.reset_index(); _td_gain_df.columns = ["feature", "gain"]
+_td_shap_df = _td_mean_abs_shap.reset_index(); _td_shap_df.columns = ["feature", "mean_abs_shap"]
+_td_gain_df["gain_rank"] = range(1, len(_td_gain_df) + 1)
+_td_shap_df["shap_rank"] = range(1, len(_td_shap_df) + 1)
+
+_td_full_imp = _td_gain_df.merge(_td_shap_df, on="feature")[
+    ["gain_rank", "shap_rank", "feature", "gain", "mean_abs_shap"]
+].sort_values("shap_rank").reset_index(drop=True)
+
+print(f"\n  {'gain_rank':>10}  {'shap_rank':>10}  {'feature':<50}  {'gain':>14}  {'mean_abs_shap':>14}")
+print(f"  {'-'*100}")
+for _, r in _td_full_imp.iterrows():
+    print(f"  {int(r['gain_rank']):>10}  {int(r['shap_rank']):>10}  {r['feature']:<50}  "
+          f"{r['gain']:>14.2f}  {r['mean_abs_shap']:>14.6f}")
+
+_td_imp_path = DATA_DIR / f"feature_importance_{TD_TARGET}.xlsx"
+_td_full_imp.to_excel(_td_imp_path, index=False)
+print(f"\n  Full importance saved: {_td_imp_path.name}")
+
+print(f"\nTD-Phase 7 complete.")
+
+# %%
+# =============================================================================
+# TD-PHASE 7B  —  SEASON-LEVEL DIAGNOSTICS: passing_tds
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"TD-PHASE 7B  --  SEASON-LEVEL DIAGNOSTICS: {TD_TARGET}")
+print("="*60)
+
+_td_pg = _td_export_df.copy()
+
+_td_szn = (
+    _td_pg.groupby("player_display_name")
+    .agg(
+        games               =("actual_passing_tds",    "count"),
+        actual_total        =("actual_passing_tds",    "sum"),
+        predicted_total     =("predicted_passing_tds", "sum"),
+        depth_chart_rank_min=("depth_chart_rank",      "min"),
+    )
+    .reset_index()
+    .sort_values("actual_total", ascending=False)
+)
+_td_szn["residual"]  = _td_szn["predicted_total"] - _td_szn["actual_total"]
+_td_szn["pct_error"] = np.where(
+    _td_szn["actual_total"] == 0, np.nan,
+    (_td_szn["predicted_total"] - _td_szn["actual_total"]) / _td_szn["actual_total"]
+)
+
+_yt_s = _td_szn["actual_total"].values.astype(float)
+_yp_s = _td_szn["predicted_total"].values.astype(float)
+_td_mae_s    = mean_absolute_error(_yt_s, _yp_s)
+_td_rmse_s   = float(np.sqrt(np.mean((_yp_s - _yt_s) ** 2)))
+_td_r2_s     = float(r2_score(_yt_s, _yp_s))
+_td_bias_s   = float(np.mean(_yp_s - _yt_s))
+_td_mape_s   = float(np.mean(np.abs(_td_szn["pct_error"].dropna())))
+_td_r_s      = float(np.corrcoef(_yt_s, _yp_s)[0, 1])
+_td_w10_s    = float((_td_szn["pct_error"].abs().dropna() <= 0.10).mean() * 100)
+_td_w20_s    = float((_td_szn["pct_error"].abs().dropna() <= 0.20).mean() * 100)
+
+print(f"\n  Season-level fit diagnostics ({len(_td_szn)} QBs):")
+print(f"  {'MAE (TDs)':<20}  {_td_mae_s:>10.3f}")
+print(f"  {'RMSE (TDs)':<20}  {_td_rmse_s:>10.3f}")
+print(f"  {'R2':<20}  {_td_r2_s:>10.4f}")
+print(f"  {'Bias (pred-act)':<20}  {_td_bias_s:>10.3f}")
+print(f"  {'MAPE':<20}  {_td_mape_s:>10.2%}")
+print(f"  {'Pearson r':<20}  {_td_r_s:>10.4f}")
+print(f"  {'Within 10%':<20}  {_td_w10_s:>10.1f}%")
+print(f"  {'Within 20%':<20}  {_td_w20_s:>10.1f}%")
+
+print(f"\n  {'QB':<25}  {'G':>3}  {'Actual':>8}  {'Pred':>8}  {'Resid':>8}  {'Pct Err':>8}  {'DC Rank':>7}")
+print(f"  {'-'*75}")
+for _, row in _td_szn.iterrows():
+    pct_str = f"{row.pct_error*100:+7.1f}%" if pd.notna(row.pct_error) else "     N/A"
+    print(f"  {row.player_display_name:<25}  {int(row.games):>3}  {row.actual_total:>8.1f}  "
+          f"{row.predicted_total:>8.2f}  {row.residual:>+8.2f}  {pct_str}  {int(row.depth_chart_rank_min):>7}")
+
+_td_szn_path = DATA_DIR / f"test_predictions_2025_{TD_TARGET}_season_totals.xlsx"
+_td_szn.to_excel(_td_szn_path, index=False)
+print(f"\n  Season totals saved: {_td_szn_path.name}")
+print(f"\nTD model complete.")
+
+# %%
+# =============================================================================
+# =============================================================================
+# RUSHING YARDS MODEL
+# =============================================================================
+# =============================================================================
+
+# %%
+# =============================================================================
+# RY-PHASE 4  —  BASELINES: rushing_yards
+# =============================================================================
+# All data (qb, df_train, df_val, df_test) already in memory from Phase 3.
+# Objective: Tweedie (right-skewed continuous, skew=2.55, many near-zero games)
+# =============================================================================
+
+print("\n" + "="*70)
+print("RUSHING YARDS MODEL")
+print("="*70)
+
+# %%
+# --- RY Feature set ---
+
+RY_FEATURES = [
+    # Identity / context (depth_chart_rank removed: near-zero SHAP)
+    "week", "age",
+
+    # Fantasy points history
+    "fantasy_pts_ewm10",
+    # fantasy_pts_ewm20 removed: 0.035 SHAP, redundant with ewm10 + career
+    "fantasy_pts_per_game_career",
+
+    # Career baselines — anchor against injury-year recency drag
+    "rushing_yards_per_game_career",
+    "carries_per_game_career",
+    "rushing_epa_per_game_career",
+
+    # Regression-to-mean gaps (career minus current EWM form)
+    # Positive = performing below career level → rebound signal
+    "rushing_yards_career_vs_recent",
+    "carries_career_vs_recent",
+    "rushing_epa_career_vs_recent",
+
+    # Physical attributes
+    "forty_yard_dash", "speed_score",
+
+    # QB rushing volume — L windows (L5 removed: too noisy, recency bias)
+    "rushing_yards_L10", "rushing_yards_L20",
+    "carries_L20",
+
+    # QB rushing efficiency — L windows
+    "rushing_epa_L20",
+    "rushing_tds_L10", "rushing_tds_L20",
+
+    # QB rushing history — EWM
+    "rushing_yards_ewm20",
+    "carries_ewm10", "carries_ewm20",
+    "rushing_epa_ewm20",
+
+    # Pressure tendency
+    "qb_pressure_rate_L20",
+    "qb_pressure_rate_ewm20",
+
+    # Passing efficiency as game-script signal
+    "passing_epa_L20",
+    "epa_per_dropback_ewm20",
+
+    # Opponent run defense (opp_def_team_team_epa_per_rush_L20 removed: 0.031 SHAP;
+    # opp_def_run_epa_L20 removed: 0.053 SHAP, redundant with L10)
+    "opp_def_rb_rb_rush_epa_per_carry_L20",
+    "opp_def_run_epa_L10",
+
+    # Own offense run context (off_rb_carry_share_L20 removed: 0.035 SHAP, redundant with L10;
+    # off_epa_per_play_L20 removed: 0.058 SHAP, captured by passing_epa + epa_per_dropback)
+    "off_pass_rate_L20",
+    "off_rb_carry_share_L10",
+    "off_rb_yards_per_carry_L20",
+    "off_rb_epa_per_carry_L10", "off_rb_epa_per_carry_L20",
+
+    # Game environment
+    "game_location", "game_temp", "game_precip_mm",
+]
+
+# Filter to columns that exist, deduplicate
+RY_FEATURES = [f for f in RY_FEATURES if f in qb.columns]
+_seen_ry = set(); _ry_deduped = []
+for _f in RY_FEATURES:
+    if _f not in _seen_ry:
+        _ry_deduped.append(_f); _seen_ry.add(_f)
+RY_FEATURES = _ry_deduped
+
+print(f"\nRY_FEATURES: {len(RY_FEATURES)} features")
+
+# %%
+# --- Build RY train/val/test splits ---
+
+RY_TARGET = "rushing_yards"
+
+X_train_ry = df_train[RY_FEATURES].reset_index(drop=True)
+X_val_ry   = df_val[RY_FEATURES].reset_index(drop=True)
+X_test_ry  = df_test[RY_FEATURES].reset_index(drop=True)
+
+Y_train_ry = df_train[[RY_TARGET]].reset_index(drop=True)
+Y_val_ry   = df_val[[RY_TARGET]].reset_index(drop=True)
+Y_test_ry  = df_test[[RY_TARGET]].reset_index(drop=True)
+
+print(f"  X_train_ry: {X_train_ry.shape}  X_val_ry: {X_val_ry.shape}  X_test_ry: {X_test_ry.shape}")
+
+# %%
+# --- RY-4.1  Global mean baseline ---
+print("\n--- RY-B1: Global mean ---")
+_ry_train_mean = float(Y_train_ry[RY_TARGET].mean())
+_ry_preds_mean = np.full(len(Y_val_ry), _ry_train_mean)
+_ry_b1 = _metrics(Y_val_ry[RY_TARGET], _ry_preds_mean, "GlobalMean")
+_ry_b1["target"] = RY_TARGET
+print(f"  {RY_TARGET:<25}  MAE={_ry_b1['MAE']:.3f}  RMSE={_ry_b1['RMSE']:.3f}  R2={_ry_b1['R2']:+.3f}  Bias={_ry_b1['Bias']:+.3f}")
+
+# %%
+# --- RY-4.2  L1-proxy baseline (rushing_yards_L3) ---
+print("\n--- RY-B2: L1-proxy (rushing_yards_L3) ---")
+_col = "rushing_yards_L3"
+if _col in df_val.columns:
+    _ry_preds_l1 = df_val[_col].fillna(_ry_train_mean).reset_index(drop=True).values
+else:
+    _ry_preds_l1 = np.full(len(Y_val_ry), _ry_train_mean)
+    print(f"  rushing_yards_L3 missing — using global mean fallback")
+_ry_b2 = _metrics(Y_val_ry[RY_TARGET], _ry_preds_l1, "L1-proxy")
+_ry_b2["target"] = RY_TARGET
+print(f"  {RY_TARGET:<25}  MAE={_ry_b2['MAE']:.3f}  RMSE={_ry_b2['RMSE']:.3f}  R2={_ry_b2['R2']:+.3f}  Bias={_ry_b2['Bias']:+.3f}")
+
+# %%
+# --- RY-4.3  Rolling L5 mean baseline ---
+print("\n--- RY-B3: Rolling L5 mean (rushing_yards_L5) ---")
+_col = "rushing_yards_L5"
+if _col in df_val.columns:
+    _ry_preds_l5 = df_val[_col].fillna(_ry_train_mean).reset_index(drop=True).values
+else:
+    _ry_preds_l5 = np.full(len(Y_val_ry), _ry_train_mean)
+    print(f"  rushing_yards_L5 missing — using global mean fallback")
+_ry_b3 = _metrics(Y_val_ry[RY_TARGET], _ry_preds_l5, "RollingL5")
+_ry_b3["target"] = RY_TARGET
+print(f"  {RY_TARGET:<25}  MAE={_ry_b3['MAE']:.3f}  RMSE={_ry_b3['RMSE']:.3f}  R2={_ry_b3['R2']:+.3f}  Bias={_ry_b3['Bias']:+.3f}")
+
+# %%
+# --- RY-4.4  Ridge baseline ---
+print("\n--- RY-B4: Ridge regression ---")
+
+from sklearn.linear_model import Ridge
+from sklearn.preprocessing import StandardScaler
+
+_ry_col_medians = X_train_ry.median().fillna(0)
+_Xtr_ry_r = X_train_ry.fillna(_ry_col_medians).fillna(0)
+_Xva_ry_r = X_val_ry.fillna(_ry_col_medians).fillna(0)
+
+_ry_scaler = StandardScaler()
+_Xtr_ry_s  = _ry_scaler.fit_transform(_Xtr_ry_r)
+_Xva_ry_s  = _ry_scaler.transform(_Xva_ry_r)
+
+_ry_ridge = Ridge(alpha=10.0)
+_ry_ridge.fit(_Xtr_ry_s, Y_train_ry[RY_TARGET].values, sample_weight=sample_weights)
+_ry_preds_ridge = np.clip(_ry_ridge.predict(_Xva_ry_s), 0, None)
+
+_ry_b4 = _metrics(Y_val_ry[RY_TARGET], _ry_preds_ridge, "Ridge")
+_ry_b4["target"] = RY_TARGET
+print(f"  {RY_TARGET:<25}  MAE={_ry_b4['MAE']:.3f}  RMSE={_ry_b4['RMSE']:.3f}  R2={_ry_b4['R2']:+.3f}  Bias={_ry_b4['Bias']:+.3f}")
+
+_ry_coef_df = (
+    pd.DataFrame({"feature": RY_FEATURES, "coefficient": _ry_ridge.coef_})
+    .assign(abs_coef=lambda d: d["coefficient"].abs())
+    .sort_values("abs_coef", ascending=False)
+    .drop(columns="abs_coef")
+    .reset_index(drop=True)
+)
+_ry_coef_df.index = range(1, len(_ry_coef_df) + 1)
+print(f"\n  Ridge coefficients — {RY_TARGET} (standardized, sorted by |coef|):")
+print(f"  {'Rank':<5} {'Feature':<55} {'Coefficient':>12}")
+print(f"  {'-'*75}")
+for rank, row in _ry_coef_df.iterrows():
+    print(f"  {rank:<5} {row['feature']:<55} {row['coefficient']:>+12.4f}")
+
+# %%
+# --- RY-4.5  Baseline summary ---
+df_ry_baselines = pd.DataFrame([_ry_b1, _ry_b2, _ry_b3, _ry_b4])
+
+print("\n" + "="*60)
+print(f"RY BASELINE SUMMARY — VAL 2024")
+print("="*60)
+sub = df_ry_baselines[["baseline", "MAE", "RMSE", "R2", "Bias"]].set_index("baseline")
+print(sub.to_string(float_format=lambda x: f"{x:+.3f}" if abs(x) < 1000 else f"{x:.3f}"))
+
+# %%
+# =============================================================================
+# RY-PHASE 5  —  LightGBM: rushing_yards (Tweedie, rolling forward CV + Optuna)
+# =============================================================================
+
+RY_OOF_FIRST_VAL_YEAR = 2017
+RY_OPTUNA_TUNE_YEAR   = 2023
+RY_OBJ                = "regression"   # 12.5% negatives — Tweedie invalid; MSE handles negatives natively
+RY_CLIP               = False          # do NOT clip — negatives are real and must be preserved
+
+print("\n" + "="*60)
+print(f"RY-PHASE 5  --  LightGBM: {RY_TARGET}")
+print("="*60)
+print(f"  objective={RY_OBJ}  rolling CV: val {RY_OOF_FIRST_VAL_YEAR}-{RY_OPTUNA_TUNE_YEAR}")
+
+# %%
+# --- RY-5.1  Optuna: tune on train 2006-2022, val 2023 ---
+
+_Xtr_opt_ry, _Ytr_opt_ry, _sw_opt_ry, _Xva_opt_ry, _Yva_opt_ry = _cv_split(
+    df_train, RY_OPTUNA_TUNE_YEAR, RY_FEATURES, [RY_TARGET]
+)
+
+_y_tr_opt_ry = _Ytr_opt_ry[RY_TARGET].values.astype(float)   # no clip — negatives are real
+_y_va_opt_ry = _Yva_opt_ry[RY_TARGET].values.astype(float)
+
+_dtrain_opt_ry = lgb.Dataset(_Xtr_opt_ry, label=_y_tr_opt_ry, weight=_sw_opt_ry, free_raw_data=False)
+_dval_opt_ry   = lgb.Dataset(_Xva_opt_ry, label=_y_va_opt_ry, reference=_dtrain_opt_ry, free_raw_data=False)
+
+def _make_ry_objective(dtrain, dval, X_va, Y_va):
+    def objective_fn(trial):
+        params = {
+            "verbosity":         -1,
+            "objective":         RY_OBJ,
+            "metric":            "mae",
+            "num_leaves":        trial.suggest_int("num_leaves", 31, 512),
+            "max_depth":         trial.suggest_int("max_depth", 4, 12),
+            "learning_rate":     trial.suggest_float("learning_rate", 0.005, 0.15, log=True),
+            "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
+            "subsample":         trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree":  trial.suggest_float("colsample_bytree", 0.4, 1.0),
+            "reg_alpha":         trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
+            "reg_lambda":        trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+            "min_split_gain":    trial.suggest_float("min_split_gain", 0.0, 1.0),
+            "extra_trees":       trial.suggest_categorical("extra_trees", [True, False]),
+            "n_jobs": -1, "seed": 42,
+        }
+        _b = lgb.train(
+            params, dtrain,
+            num_boost_round=2000,
+            valid_sets=[dval],
+            callbacks=[early_stopping(50, verbose=False), log_evaluation(-1)],
+        )
+        return mean_absolute_error(Y_va[RY_TARGET], _b.predict(X_va))
+    return objective_fn
+
+RY_N_TRIALS = 60
+ry_study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=42))
+_ry_progress = _OptunaProgress(RY_N_TRIALS, RY_TARGET)
+ry_study.optimize(
+    _make_ry_objective(_dtrain_opt_ry, _dval_opt_ry, _Xva_opt_ry, _Yva_opt_ry),
+    n_trials=RY_N_TRIALS,
+    show_progress_bar=False,
+    callbacks=[_ry_progress],
+)
+_ry_progress.close()
+
+ry_best_params = ry_study.best_params
+print(f"\n  Optuna best MAE: {ry_study.best_value:.4f}  (trial {ry_study.best_trial.number}/{RY_N_TRIALS})")
+print(f"  Best params: {ry_best_params}")
+
+# %%
+# --- RY-5.2  Rolling forward CV with best_params ---
+
+ry_final_params = {
+    "verbosity": -1, "objective": RY_OBJ,
+    "metric": "mae", "n_jobs": -1, "seed": 42,
+    **{k: v for k, v in ry_best_params.items() if k != "extra_trees"},
+    "extra_trees": ry_best_params["extra_trees"],
+}
+
+ry_cv_val_years = list(range(RY_OOF_FIRST_VAL_YEAR, TRAIN_END + 1))
+print(f"\n  Rolling forward CV: {len(ry_cv_val_years)} folds  ({ry_cv_val_years[0]}-{ry_cv_val_years[-1]})")
+
+ry_oof_actual = []; ry_oof_pred = []; ry_oof_years = []; ry_best_iters = []
+
+for _yr in ry_cv_val_years:
+    _Xtr, _Ytr, _sw, _Xva, _Yva = _cv_split(df_train, _yr, RY_FEATURES, [RY_TARGET])
+    _y_tr = _Ytr[RY_TARGET].values.astype(float)   # no clip
+    _y_va = _Yva[RY_TARGET].values.astype(float)
+    _dt = lgb.Dataset(_Xtr, label=_y_tr, weight=_sw, free_raw_data=False)
+    _dv = lgb.Dataset(_Xva, label=_y_va, reference=_dt, free_raw_data=False)
+    _b = lgb.train(
+        ry_final_params, _dt,
+        num_boost_round=2000,
+        valid_sets=[_dv],
+        callbacks=[early_stopping(100, verbose=False), log_evaluation(-1)],
+    )
+    _p = _b.predict(_Xva)
+    ry_oof_actual.extend(_Yva[RY_TARGET].tolist())
+    ry_oof_pred.extend(_p.tolist())
+    ry_oof_years.extend([_yr] * len(_Yva))
+    ry_best_iters.append(_b.best_iteration)
+    print(f"    fold val={_yr}  n_train={len(_Xtr):,}  n_val={len(_Xva):,}  "
+          f"best_iter={_b.best_iteration}  "
+          f"MAE={mean_absolute_error(_Yva[RY_TARGET], _p):.3f}")
+
+ry_oof_actual    = np.array(ry_oof_actual)
+ry_oof_pred      = np.array(ry_oof_pred)
+ry_oof_years     = np.array(ry_oof_years)
+ry_mean_best_iter = int(np.mean(ry_best_iters))
+print(f"\n  Mean best_iteration across folds: {ry_mean_best_iter}")
+
+# %%
+# --- RY-5.3  OOF metrics: per-year + overall ---
+
+print("\n" + "="*60)
+print(f"RY OOF METRICS (rolling forward CV)  --  {RY_TARGET}")
+print("="*60)
+print(f"  {'Year':<6}  {'N':>5}  {'MAE':>8}  {'RMSE':>8}  {'R2':>8}  {'Bias':>8}")
+print(f"  {'-'*52}")
+
+for _yr in ry_cv_val_years:
+    _mask = ry_oof_years == _yr
+    _m    = _metrics(ry_oof_actual[_mask], ry_oof_pred[_mask], "OOF")
+    print(f"  {_yr:<6}  {_mask.sum():>5}  "
+          f"{_m['MAE']:>8.3f}  {_m['RMSE']:>8.3f}  {_m['R2']:>+8.3f}  {_m['Bias']:>+8.3f}")
+
+_ry_m_overall = _metrics(ry_oof_actual, ry_oof_pred, "OOF-Overall")
+print(f"  {'-'*52}")
+print(f"  {'TOTAL':<6}  {len(ry_oof_actual):>5}  "
+      f"{_ry_m_overall['MAE']:>8.3f}  {_ry_m_overall['RMSE']:>8.3f}  "
+      f"{_ry_m_overall['R2']:>+8.3f}  {_ry_m_overall['Bias']:>+8.3f}")
+
+# %%
+# --- RY-5.4  Final model: train 2006-2023, n_trees = mean best_iter ---
+
+print(f"\n  Final RY model: train 2006-{TRAIN_END}, n_trees={ry_mean_best_iter}")
+
+_y_tr_ry_full = Y_train_ry[RY_TARGET].values.astype(float)   # no clip — negatives are real
+_dtrain_ry_final = lgb.Dataset(X_train_ry, label=_y_tr_ry_full, weight=sample_weights, free_raw_data=False)
+
+ry_booster_final = lgb.train(
+    {**ry_final_params, "metric": "none"},
+    _dtrain_ry_final,
+    num_boost_round=ry_mean_best_iter,
+    callbacks=[log_evaluation(-1)],
+)
+
+_ry_preds_val = ry_booster_final.predict(X_val_ry)
+_ry_m_val = _metrics(Y_val_ry[RY_TARGET], _ry_preds_val, "LightGBM")
+print(f"  Val 2024 -> MAE={_ry_m_val['MAE']:.3f}  RMSE={_ry_m_val['RMSE']:.3f}  "
+      f"R2={_ry_m_val['R2']:+.3f}  Bias={_ry_m_val['Bias']:+.3f}")
+
+# %%
+# --- RY-5.5  Summary vs baselines ---
+print("\n" + "="*60)
+print(f"RY-PHASE 5 SUMMARY -- {RY_TARGET}")
+print("="*60)
+print(f"  {'Metric':<10}  {'LGB OOF':>10}  {'LGB Val24':>10}  {'Ridge Val24':>12}")
+for metric in ["MAE", "RMSE", "R2"]:
+    print(f"  {metric:<10}  {float(_ry_m_overall[metric]):>10.3f}  "
+          f"{_ry_m_val[metric]:>10.3f}  {_ry_b4[metric]:>12.3f}")
+
+print(f"\nRY-Phase 5 complete.")
+
+# Save to registry
+lgb_models["rushing_yards"]      = ry_booster_final
+best_params_all["rushing_yards"] = ry_best_params
+oof_store["rushing_yards"] = {
+    "oof_actual": ry_oof_actual,
+    "oof_pred":   ry_oof_pred,
+    "oof_years":  ry_oof_years,
+}
+joblib.dump({
+    "lgb_models":     lgb_models,
+    "optuna_studies": optuna_studies,
+    "df_phase5":      pd.DataFrame(phase5_records),
+    "best_params":    best_params_all,
+    "oof_store":      oof_store,
+    "feature_cols":   FEATURE_COLS,
+    "td_feature_cols": TD_FEATURES,
+    "ry_feature_cols": RY_FEATURES,
+    "targets":        TARGETS,
+    "loss_functions": LOSS_FUNCTIONS,
+    "tweedie_power":  TWEEDIE_POWER,
+}, registry_path)
+print(f"  Registry updated.")
+
+# %%
+# =============================================================================
+# RY-PHASE 6  —  EVALUATION & DIAGNOSTICS: rushing_yards
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"RY-PHASE 6  --  EVALUATION: {RY_TARGET}")
+print("="*60)
+
+_ry_preds_test = ry_booster_final.predict(X_test_ry)
+
+# %%
+# --- RY-6.1  Full metrics table ---
+
+print(f"\n  [{RY_TARGET}]")
+for split, yt, yp in [("Val 2024", Y_val_ry[RY_TARGET].values, _ry_preds_val),
+                      ("Test 2025", Y_test_ry[RY_TARGET].values, _ry_preds_test)]:
+    fm = _full_metrics(yt, yp)
+    print(f"\n  [{split}]")
+    for k, v in fm.items():
+        print(f"    {k:<15}  {v:>10.4f}")
+
+# %%
+# --- RY-6.2  Predicted vs actual scatter ---
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",  Y_val_ry[RY_TARGET].values,  _ry_preds_val),
+    ("Test 2025", Y_test_ry[RY_TARGET].values, _ry_preds_test),
+]):
+    lim = max(yt.max(), yp.max()) * 1.05
+    ax.scatter(yt, yp, alpha=0.25, s=12, color="steelblue", edgecolors="none")
+    ax.plot([0, lim], [0, lim], "r--", lw=1.5, label="Perfect")
+    m_c, b_c = np.polyfit(yt, yp, 1)
+    xs = np.linspace(0, lim, 100)
+    ax.plot(xs, m_c * xs + b_c, "k-", lw=1.2, alpha=0.7, label="OLS fit")
+    r2v   = r2_score(yt, yp)
+    pearr = np.corrcoef(yt, yp)[0, 1]
+    ax.set_title(f"Rushing Yards -- {split}\nR2={r2v:.3f}  r={pearr:.3f}",
+                 fontsize=10, fontweight="bold")
+    ax.set_xlabel("Actual Rushing Yards", fontsize=9)
+    ax.set_ylabel("Predicted Rushing Yards", fontsize=9)
+    ax.legend(fontsize=8)
+    ax.tick_params(labelsize=8)
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{RY_TARGET}_pred_vs_actual.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- RY-6.3  Residual distribution ---
+
+from scipy.stats import gaussian_kde as _gkde_ry, norm as _sp_norm_ry
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",    Y_val_ry[RY_TARGET].values,  _ry_preds_val),
+    ("Test 2025",   Y_test_ry[RY_TARGET].values, _ry_preds_test),
+    ("OOF 2017-23", ry_oof_actual,               ry_oof_pred),
+]):
+    resid = yp - yt
+    ax.hist(resid, bins=40, density=True, color="steelblue", alpha=0.6, edgecolor="white")
+    kde_x = np.linspace(resid.min(), resid.max(), 300)
+    try:
+        ax.plot(kde_x, _gkde_ry(resid)(kde_x), "k-", lw=1.5, label="KDE")
+        ax.plot(kde_x, _sp_norm_ry.pdf(kde_x, resid.mean(), resid.std()), "r--", lw=1.2, alpha=0.8, label="Normal")
+    except Exception:
+        pass
+    ax.axvline(0, color="red", linestyle="--", lw=1.5)
+    ax.set_title(f"Residuals — Rushing Yards {split}\nbias={resid.mean():+.2f}  sd={resid.std():.2f}",
+                 fontsize=10, fontweight="bold")
+    ax.set_xlabel("Residual (pred - actual)", fontsize=9)
+    ax.set_ylabel("Density", fontsize=9)
+    ax.legend(fontsize=8)
+    ax.tick_params(labelsize=8)
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{RY_TARGET}_residuals.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- RY-6.4  Calibration curve ---
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",  Y_val_ry[RY_TARGET].values,  _ry_preds_val),
+    ("Test 2025", Y_test_ry[RY_TARGET].values, _ry_preds_test),
+]):
+    _cal_df = pd.DataFrame({"actual": yt, "pred": yp})
+    try:
+        _cal_df["decile"] = pd.qcut(_cal_df["pred"], q=10, labels=False, duplicates="drop")
+        _cal_grp = _cal_df.groupby("decile").agg(mean_pred=("pred", "mean"), mean_actual=("actual", "mean"))
+        lim = max(_cal_grp["mean_pred"].max(), _cal_grp["mean_actual"].max()) * 1.2
+        ax.plot(_cal_grp["mean_pred"], _cal_grp["mean_actual"], "o-", color="steelblue", lw=1.5)
+        for _, r in _cal_grp.iterrows():
+            ax.annotate(f"{r.name}", (r["mean_pred"], r["mean_actual"]), fontsize=7,
+                        textcoords="offset points", xytext=(4, 2))
+        ax.plot([0, lim], [0, lim], "r--", lw=1.5, label="Perfect calibration")
+        ax.set_title(f"Rushing Yards Calibration -- {split}", fontsize=10, fontweight="bold")
+        ax.set_xlabel("Mean Predicted (decile)", fontsize=9)
+        ax.set_ylabel("Mean Actual", fontsize=9)
+        ax.legend(fontsize=8)
+    except Exception as e:
+        ax.set_title(f"Calibration skipped: {e}")
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{RY_TARGET}_calibration.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- RY-6.5  MAE by week (test 2025) ---
+
+try:
+    _ry_week_df = pd.DataFrame({
+        "week":   df_test["week"].values,
+        "actual": Y_test_ry[RY_TARGET].values,
+        "pred":   _ry_preds_test,
+    })
+    _ry_wk = (_ry_week_df.groupby("week")
+              .apply(lambda g: mean_absolute_error(g["actual"], g["pred"]))
+              .reset_index(name="MAE"))
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(_ry_wk["week"], _ry_wk["MAE"], color="steelblue", edgecolor="white")
+    ax.set_title(f"MAE by Week — Rushing Yards (Test 2025)", fontsize=11, fontweight="bold")
+    ax.set_xlabel("NFL Week", fontsize=9)
+    ax.set_ylabel("MAE", fontsize=9)
+    ax.tick_params(labelsize=8)
+    plt.tight_layout()
+    _fig_path = FIG_DIR / f"phase6_{RY_TARGET}_mae_by_week.png"
+    plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+    plt.close()
+    _show(_fig_path)
+    print(f"  Saved: {_fig_path.name}")
+except Exception as e:
+    print(f"  MAE-by-week skipped: {e}")
+
+# %%
+# --- RY-6.6  Export test predictions ---
+
+_ry_export_df = df_test[["player_display_name", "week", "attempts", "depth_chart_rank"]].copy().reset_index(drop=True)
+_ry_export_df["actual_rushing_yards"]    = Y_test_ry[RY_TARGET].values
+_ry_export_df["predicted_rushing_yards"] = _ry_preds_test
+_ry_export_df["residual"]               = _ry_export_df["predicted_rushing_yards"] - _ry_export_df["actual_rushing_yards"]
+_ry_export_df = _ry_export_df.sort_values(["week", "actual_rushing_yards"], ascending=[True, False]).reset_index(drop=True)
+
+_ry_export_path = DATA_DIR / f"test_predictions_2025_{RY_TARGET}.xlsx"
+_ry_export_df.to_excel(_ry_export_path, index=False)
+print(f"\n  2025 test predictions saved: {_ry_export_path.name}  ({len(_ry_export_df)} rows)")
+print(f"\nRY-Phase 6 complete.")
+
+# %%
+# =============================================================================
+# RY-PHASE 7  —  FEATURE IMPORTANCE & SHAP: rushing_yards
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"RY-PHASE 7  --  FEATURE IMPORTANCE: {RY_TARGET}")
+print("="*60)
+
+import shap as _shap_lib
+
+# %%
+# --- RY-7.1  LightGBM native gain importance ---
+
+_ry_imp_gain = (
+    pd.Series(ry_booster_final.feature_importance(importance_type="gain"),
+              index=RY_FEATURES)
+    .sort_values(ascending=False)
+)
+
+fig, ax = plt.subplots(figsize=(10, 8))
+_ry_imp_gain.head(25).plot.barh(ax=ax, color="steelblue", edgecolor="white")
+ax.invert_yaxis()
+ax.set_title(f"LightGBM Gain Importance (top 25) — {RY_TARGET}", fontsize=11, fontweight="bold")
+ax.set_xlabel("Total Gain", fontsize=9)
+ax.tick_params(labelsize=8)
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{RY_TARGET}_gain_importance.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- RY-7.2  SHAP ---
+
+_ry_sample_idx = np.random.default_rng(42).choice(len(X_test_ry), size=min(500, len(X_test_ry)), replace=False)
+_ry_X_shap     = X_test_ry.iloc[_ry_sample_idx].reset_index(drop=True)
+
+_ry_explainer   = _shap_lib.TreeExplainer(ry_booster_final)
+_ry_shap_values = _ry_explainer.shap_values(_ry_X_shap)
+
+_ry_mean_abs_shap = pd.Series(
+    np.abs(_ry_shap_values).mean(axis=0),
+    index=RY_FEATURES,
+).sort_values(ascending=False)
+
+# Beeswarm
+fig, ax = plt.subplots(figsize=(10, 9))
+_shap_lib.summary_plot(_ry_shap_values, _ry_X_shap, max_display=20, show=False)
+plt.title(f"SHAP Beeswarm — {RY_TARGET} (top 20)", fontsize=11, fontweight="bold")
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{RY_TARGET}_shap_beeswarm.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# Bar plot
+fig, ax = plt.subplots(figsize=(10, 8))
+_ry_mean_abs_shap.head(20).plot.barh(ax=ax, color="darkorange", edgecolor="white")
+ax.invert_yaxis()
+ax.set_title(f"Mean |SHAP| (top 20) — {RY_TARGET}", fontsize=11, fontweight="bold")
+ax.set_xlabel("Mean |SHAP value|", fontsize=9)
+ax.tick_params(labelsize=8)
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{RY_TARGET}_shap_bar.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- RY-7.3  Full importance table (all features) ---
+
+_ry_gain_df = _ry_imp_gain.reset_index(); _ry_gain_df.columns = ["feature", "gain"]
+_ry_shap_df = _ry_mean_abs_shap.reset_index(); _ry_shap_df.columns = ["feature", "mean_abs_shap"]
+_ry_gain_df["gain_rank"] = range(1, len(_ry_gain_df) + 1)
+_ry_shap_df["shap_rank"] = range(1, len(_ry_shap_df) + 1)
+
+_ry_full_imp = _ry_gain_df.merge(_ry_shap_df, on="feature")[
+    ["gain_rank", "shap_rank", "feature", "gain", "mean_abs_shap"]
+].sort_values("shap_rank").reset_index(drop=True)
+
+print(f"\n  {'gain_rank':>10}  {'shap_rank':>10}  {'feature':<55}  {'gain':>14}  {'mean_abs_shap':>14}")
+print(f"  {'-'*105}")
+for _, r in _ry_full_imp.iterrows():
+    print(f"  {int(r['gain_rank']):>10}  {int(r['shap_rank']):>10}  {r['feature']:<55}  "
+          f"{r['gain']:>14.2f}  {r['mean_abs_shap']:>14.6f}")
+
+_ry_imp_path = DATA_DIR / f"feature_importance_{RY_TARGET}.xlsx"
+_ry_full_imp.to_excel(_ry_imp_path, index=False)
+print(f"\n  Full importance saved: {_ry_imp_path.name}")
+print(f"\nRY-Phase 7 complete.")
+
+# %%
+# =============================================================================
+# RY-PHASE 7B  —  SEASON-LEVEL DIAGNOSTICS: rushing_yards
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"RY-PHASE 7B  --  SEASON-LEVEL DIAGNOSTICS: {RY_TARGET}")
+print("="*60)
+
+_ry_pg = _ry_export_df.copy()
+
+_ry_szn = (
+    _ry_pg.groupby("player_display_name")
+    .agg(
+        games               =("actual_rushing_yards",    "count"),
+        actual_total        =("actual_rushing_yards",    "sum"),
+        predicted_total     =("predicted_rushing_yards", "sum"),
+        depth_chart_rank_min=("depth_chart_rank",        "min"),
+    )
+    .reset_index()
+    .sort_values("actual_total", ascending=False)
+)
+_ry_szn["residual"]  = _ry_szn["predicted_total"] - _ry_szn["actual_total"]
+_ry_szn["pct_error"] = np.where(
+    _ry_szn["actual_total"] == 0, np.nan,
+    (_ry_szn["predicted_total"] - _ry_szn["actual_total"]) / _ry_szn["actual_total"]
+)
+
+_yt_s = _ry_szn["actual_total"].values.astype(float)
+_yp_s = _ry_szn["predicted_total"].values.astype(float)
+_ry_mae_s  = mean_absolute_error(_yt_s, _yp_s)
+_ry_rmse_s = float(np.sqrt(np.mean((_yp_s - _yt_s) ** 2)))
+_ry_r2_s   = float(r2_score(_yt_s, _yp_s))
+_ry_bias_s = float(np.mean(_yp_s - _yt_s))
+_ry_mape_s = float(np.mean(np.abs(_ry_szn["pct_error"].dropna())))
+_ry_r_s    = float(np.corrcoef(_yt_s, _yp_s)[0, 1])
+_ry_w10_s  = float((_ry_szn["pct_error"].abs().dropna() <= 0.10).mean() * 100)
+_ry_w20_s  = float((_ry_szn["pct_error"].abs().dropna() <= 0.20).mean() * 100)
+
+print(f"\n  Season-level fit diagnostics ({len(_ry_szn)} QBs):")
+print(f"  {'MAE (yards)':<20}  {_ry_mae_s:>10.1f}")
+print(f"  {'RMSE (yards)':<20}  {_ry_rmse_s:>10.1f}")
+print(f"  {'R2':<20}  {_ry_r2_s:>10.4f}")
+print(f"  {'Bias (pred-act)':<20}  {_ry_bias_s:>10.1f}")
+print(f"  {'MAPE':<20}  {_ry_mape_s:>10.2%}")
+print(f"  {'Pearson r':<20}  {_ry_r_s:>10.4f}")
+print(f"  {'Within 10%':<20}  {_ry_w10_s:>10.1f}%")
+print(f"  {'Within 20%':<20}  {_ry_w20_s:>10.1f}%")
+
+print(f"\n  {'QB':<25}  {'G':>3}  {'Actual':>8}  {'Pred':>8}  {'Resid':>8}  {'Pct Err':>8}  {'DC Rank':>7}")
+print(f"  {'-'*75}")
+for _, row in _ry_szn.iterrows():
+    pct_str = f"{row.pct_error*100:+7.1f}%" if pd.notna(row.pct_error) else "     N/A"
+    print(f"  {row.player_display_name:<25}  {int(row.games):>3}  {row.actual_total:>8.0f}  "
+          f"{row.predicted_total:>8.0f}  {row.residual:>+8.0f}  {pct_str}  {int(row.depth_chart_rank_min):>7}")
+
+_ry_szn_path = DATA_DIR / f"test_predictions_2025_{RY_TARGET}_season_totals.xlsx"
+_ry_szn.to_excel(_ry_szn_path, index=False)
+print(f"\n  Season totals saved: {_ry_szn_path.name}")
+print(f"\nRushing yards model complete.")
+
+# %%
+# =============================================================================
+# RT-PHASE 4-7B  —  rushing_tds  (Poisson, same pipeline as rushing_yards)
+# =============================================================================
+
+# %%
+# --- RT Feature set ---
+
+# RT_FEATURES_RIDGE: lean 28-feature set, multicollinearity-clean for linear model
+RT_FEATURES_RIDGE = [
+    "depth_chart_rank", "age",
+    "fantasy_pts_ewm10", "fantasy_pts_ewm20", "fantasy_pts_per_game_career",
+    "rushing_tds_per_game_career",
+    "forty_yard_dash", "speed_score",
+    "rushing_tds_L20",
+    "rushing_tds_ewm10", "rushing_tds_ewm20",
+    "rushing_yards_L10", "rushing_yards_L20",
+    "carries_L10", "carries_L20",
+    "rushing_yards_ewm20",
+    "carries_ewm10", "carries_ewm20",
+    "rushing_epa_L5", "rushing_epa_L20",
+    "rushing_epa_ewm20",
+    "qb_pressure_rate_L5", "qb_pressure_rate_L10",
+    "qb_pressure_rate_ewm20",
+    "passing_epa_L5",
+    "opp_def_run_epa_L10", "opp_def_run_epa_L20",
+    "off_rb_carry_share_L5", "off_rb_carry_share_L20",
+    "game_location", "game_temp", "game_precip_mm", "is_dome",
+]
+
+# RT_FEATURES_LGB: full set — adds short windows that gave LGB nonlinear signal
+RT_FEATURES_LGB = RT_FEATURES_RIDGE + [
+    "season",
+    "rushing_tds_L5", "rushing_tds_L10", "rushing_tds_ewm5",
+    "rushing_yards_L5", "rushing_yards_ewm10",
+    "carries_L5",
+    "rushing_epa_L10",
+    "qb_pressure_rate_L20",
+]
+
+def _dedup(feats, df):
+    seen = set()
+    out = []
+    for f in feats:
+        if f in df.columns and f not in seen:
+            out.append(f); seen.add(f)
+    return out
+
+RT_FEATURES_RIDGE = _dedup(RT_FEATURES_RIDGE, qb)
+RT_FEATURES_LGB   = _dedup(RT_FEATURES_LGB,   qb)
+
+print(f"\nRT_FEATURES_RIDGE: {len(RT_FEATURES_RIDGE)} features")
+print(f"RT_FEATURES_LGB:   {len(RT_FEATURES_LGB)} features")
+
+# %%
+# --- Build RT train/val/test splits ---
+
+RT_TARGET = "rushing_tds"
+
+# LGB uses the full feature set
+X_train_rt = df_train[RT_FEATURES_LGB].reset_index(drop=True)
+X_val_rt   = df_val[RT_FEATURES_LGB].reset_index(drop=True)
+X_test_rt  = df_test[RT_FEATURES_LGB].reset_index(drop=True)
+
+# Ridge uses the lean feature set
+X_train_rt_ridge = df_train[RT_FEATURES_RIDGE].reset_index(drop=True)
+X_val_rt_ridge   = df_val[RT_FEATURES_RIDGE].reset_index(drop=True)
+X_test_rt_ridge  = df_test[RT_FEATURES_RIDGE].reset_index(drop=True)
+
+Y_train_rt = df_train[[RT_TARGET]].reset_index(drop=True)
+Y_val_rt   = df_val[[RT_TARGET]].reset_index(drop=True)
+Y_test_rt  = df_test[[RT_TARGET]].reset_index(drop=True)
+
+print(f"  LGB:   X_train={X_train_rt.shape}  X_val={X_val_rt.shape}  X_test={X_test_rt.shape}")
+print(f"  Ridge: X_train={X_train_rt_ridge.shape}  X_val={X_val_rt_ridge.shape}  X_test={X_test_rt_ridge.shape}")
+
+# %%
+# --- RT-4.1  Global mean baseline ---
+print("\n--- RT-B1: Global mean ---")
+_rt_train_mean = float(Y_train_rt[RT_TARGET].mean())
+_rt_preds_mean = np.full(len(Y_val_rt), _rt_train_mean)
+_rt_b1 = _metrics(Y_val_rt[RT_TARGET], _rt_preds_mean, "GlobalMean")
+_rt_b1["target"] = RT_TARGET
+print(f"  {RT_TARGET:<25}  MAE={_rt_b1['MAE']:.3f}  RMSE={_rt_b1['RMSE']:.3f}  R2={_rt_b1['R2']:+.3f}  Bias={_rt_b1['Bias']:+.3f}")
+
+# %%
+# --- RT-4.2  L1-proxy baseline (rushing_tds_L3) ---
+print("\n--- RT-B2: L1-proxy (rushing_tds_L3) ---")
+_col = "rushing_tds_L3"
+if _col in df_val.columns:
+    _rt_preds_l1 = df_val[_col].fillna(_rt_train_mean).reset_index(drop=True).values
+else:
+    _rt_preds_l1 = np.full(len(Y_val_rt), _rt_train_mean)
+    print(f"  rushing_tds_L3 missing — using global mean fallback")
+_rt_b2 = _metrics(Y_val_rt[RT_TARGET], _rt_preds_l1, "L1-proxy")
+_rt_b2["target"] = RT_TARGET
+print(f"  {RT_TARGET:<25}  MAE={_rt_b2['MAE']:.3f}  RMSE={_rt_b2['RMSE']:.3f}  R2={_rt_b2['R2']:+.3f}  Bias={_rt_b2['Bias']:+.3f}")
+
+# %%
+# --- RT-4.3  Rolling L5 mean baseline ---
+print("\n--- RT-B3: Rolling L5 mean (rushing_tds_L5) ---")
+_col = "rushing_tds_L5"
+if _col in df_val.columns:
+    _rt_preds_l5 = df_val[_col].fillna(_rt_train_mean).reset_index(drop=True).values
+else:
+    _rt_preds_l5 = np.full(len(Y_val_rt), _rt_train_mean)
+    print(f"  rushing_tds_L5 missing — using global mean fallback")
+_rt_b3 = _metrics(Y_val_rt[RT_TARGET], _rt_preds_l5, "RollingL5")
+_rt_b3["target"] = RT_TARGET
+print(f"  {RT_TARGET:<25}  MAE={_rt_b3['MAE']:.3f}  RMSE={_rt_b3['RMSE']:.3f}  R2={_rt_b3['R2']:+.3f}  Bias={_rt_b3['Bias']:+.3f}")
+
+# %%
+# --- RT-4.4  Ridge baseline ---
+print("\n--- RT-B4: Ridge regression ---")
+
+_rt_col_medians = X_train_rt_ridge.median().fillna(0)
+_Xtr_rt_r = X_train_rt_ridge.fillna(_rt_col_medians).fillna(0)
+_Xva_rt_r = X_val_rt_ridge.fillna(_rt_col_medians).fillna(0)
+
+_rt_scaler = StandardScaler()
+_Xtr_rt_s  = _rt_scaler.fit_transform(_Xtr_rt_r)
+_Xva_rt_s  = _rt_scaler.transform(_Xva_rt_r)
+
+_rt_ridge = Ridge(alpha=10.0)
+_rt_ridge.fit(_Xtr_rt_s, Y_train_rt[RT_TARGET].values, sample_weight=sample_weights)
+_rt_preds_ridge = np.clip(_rt_ridge.predict(_Xva_rt_s), 0, None)
+
+_rt_b4 = _metrics(Y_val_rt[RT_TARGET], _rt_preds_ridge, "Ridge")
+_rt_b4["target"] = RT_TARGET
+print(f"  {RT_TARGET:<25}  MAE={_rt_b4['MAE']:.3f}  RMSE={_rt_b4['RMSE']:.3f}  R2={_rt_b4['R2']:+.3f}  Bias={_rt_b4['Bias']:+.3f}")
+
+_rt_coef_df = (
+    pd.DataFrame({"feature": RT_FEATURES_RIDGE, "coefficient": _rt_ridge.coef_})
+    .assign(abs_coef=lambda d: d["coefficient"].abs())
+    .sort_values("abs_coef", ascending=False)
+    .drop(columns="abs_coef")
+    .reset_index(drop=True)
+)
+_rt_coef_df.index = range(1, len(_rt_coef_df) + 1)
+print(f"\n  Ridge coefficients — {RT_TARGET} (standardized, sorted by |coef|):")
+print(f"  {'Rank':<5} {'Feature':<55} {'Coefficient':>12}")
+print(f"  {'-'*75}")
+for rank, row in _rt_coef_df.iterrows():
+    print(f"  {rank:<5} {row['feature']:<55} {row['coefficient']:>+12.4f}")
+
+# %%
+# --- RT-4.5  Baseline summary ---
+df_rt_baselines = pd.DataFrame([_rt_b1, _rt_b2, _rt_b3, _rt_b4])
+
+print("\n" + "="*60)
+print(f"RT BASELINE SUMMARY — VAL 2024")
+print("="*60)
+sub = df_rt_baselines[["baseline", "MAE", "RMSE", "R2", "Bias"]].set_index("baseline")
+print(sub.to_string(float_format=lambda x: f"{x:+.3f}" if abs(x) < 1000 else f"{x:.3f}"))
+
+# %%
+# =============================================================================
+# RT-PHASE 5  —  LightGBM: rushing_tds (Poisson, rolling forward CV + Optuna)
+# =============================================================================
+
+RT_OOF_FIRST_VAL_YEAR = 2017
+RT_OPTUNA_TUNE_YEAR   = 2023
+RT_CLIP               = True  # clip predictions >= 0
+
+print("\n" + "="*60)
+print(f"RT-PHASE 5  --  LightGBM: {RT_TARGET}")
+print("="*60)
+print(f"  objective=Optuna[regression|tweedie]  rolling CV: val {RT_OOF_FIRST_VAL_YEAR}-{RT_OPTUNA_TUNE_YEAR}")
+
+# %%
+# --- RT-5.1  Optuna: tune on train 2006-2022, val 2023 ---
+
+_Xtr_opt_rt, _Ytr_opt_rt, _sw_opt_rt, _Xva_opt_rt, _Yva_opt_rt = _cv_split(
+    df_train, RT_OPTUNA_TUNE_YEAR, RT_FEATURES_LGB, [RT_TARGET]
+)
+
+_y_tr_opt_rt     = np.clip(_Ytr_opt_rt[RT_TARGET].values.astype(float), 0, None)
+_y_va_opt_rt_raw = np.clip(_Yva_opt_rt[RT_TARGET].values.astype(float), 0, None)
+_dtrain_opt_rt = lgb.Dataset(_Xtr_opt_rt, label=_y_tr_opt_rt, weight=_sw_opt_rt, free_raw_data=False)
+_dval_opt_rt   = lgb.Dataset(_Xva_opt_rt, label=_y_va_opt_rt_raw, reference=_dtrain_opt_rt, free_raw_data=False)
+
+def _make_rt_objective(dtrain, dval, X_va, Y_va_raw):
+    def objective_fn(trial):
+        params = {
+            "verbosity":         -1,
+            "objective":         "regression",   # MSE — squares errors, penalizes missed TD games heavily
+            "metric":            "mse",           # consistent with objective; early stopping on MSE
+            "num_leaves":        trial.suggest_int("num_leaves", 31, 512),
+            "max_depth":         trial.suggest_int("max_depth", 4, 12),
+            "learning_rate":     trial.suggest_float("learning_rate", 0.005, 0.15, log=True),
+            "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
+            "subsample":         trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree":  trial.suggest_float("colsample_bytree", 0.4, 1.0),
+            "reg_alpha":         trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
+            "reg_lambda":        trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+            "min_split_gain":    trial.suggest_float("min_split_gain", 0.0, 1.0),
+            "extra_trees":       trial.suggest_categorical("extra_trees", [True, False]),
+            "n_jobs": -1, "seed": 42,
+        }
+        _b = lgb.train(
+            params, dtrain,
+            num_boost_round=2000,
+            valid_sets=[dval],
+            callbacks=[early_stopping(50, verbose=False), log_evaluation(-1)],
+        )
+        _preds_orig = np.clip(_b.predict(X_va), 0, None)
+        # Return RMSE — squares errors so Optuna can't game it by predicting near-zero
+        return float(np.sqrt(np.mean((_preds_orig - Y_va_raw) ** 2)))
+    return objective_fn
+
+RT_N_TRIALS = 60
+rt_study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=42))
+_rt_progress = _OptunaProgress(RT_N_TRIALS, RT_TARGET)
+rt_study.optimize(
+    _make_rt_objective(_dtrain_opt_rt, _dval_opt_rt, _Xva_opt_rt, _y_va_opt_rt_raw),
+    n_trials=RT_N_TRIALS,
+    show_progress_bar=False,
+    callbacks=[_rt_progress],
+)
+_rt_progress.close()
+
+rt_best_params = rt_study.best_params
+print(f"\n  Optuna best RMSE: {rt_study.best_value:.4f}  (trial {rt_study.best_trial.number}/{RT_N_TRIALS})")
+print(f"  Best params: {rt_best_params}")
+
+# %%
+# --- RT-5.2  Rolling forward CV with best_params ---
+
+rt_final_params = {
+    "verbosity": -1,
+    "objective": "regression",
+    "metric": "mse",
+    "n_jobs": -1, "seed": 42,
+    **{k: v for k, v in rt_best_params.items() if k != "extra_trees"},
+    "extra_trees": rt_best_params["extra_trees"],
+}
+
+rt_cv_val_years = list(range(RT_OOF_FIRST_VAL_YEAR, TRAIN_END + 1))
+print(f"\n  Rolling forward CV: {len(rt_cv_val_years)} folds  ({rt_cv_val_years[0]}-{rt_cv_val_years[-1]})")
+
+rt_oof_actual = []; rt_oof_pred = []; rt_oof_years = []; rt_best_iters = []
+
+for _yr in rt_cv_val_years:
+    _Xtr, _Ytr, _sw, _Xva, _Yva = _cv_split(df_train, _yr, RT_FEATURES_LGB, [RT_TARGET])
+    _y_tr_raw = np.clip(_Ytr[RT_TARGET].values.astype(float), 0, None)
+    _y_va_raw = np.clip(_Yva[RT_TARGET].values.astype(float), 0, None)
+    _dt = lgb.Dataset(_Xtr, label=_y_tr_raw, weight=_sw, free_raw_data=False)
+    _dv = lgb.Dataset(_Xva, label=_y_va_raw, reference=_dt, free_raw_data=False)
+    _b = lgb.train(
+        rt_final_params, _dt,
+        num_boost_round=2000,
+        valid_sets=[_dv],
+        callbacks=[early_stopping(100, verbose=False), log_evaluation(-1)],
+    )
+    _p = np.clip(_b.predict(_Xva), 0, None)
+    rt_oof_actual.extend(_y_va_raw.tolist())
+    rt_oof_pred.extend(_p.tolist())
+    rt_oof_years.extend([_yr] * len(_Yva))
+    rt_best_iters.append(_b.best_iteration)
+    print(f"    fold val={_yr}  n_train={len(_Xtr):,}  n_val={len(_Xva):,}  "
+          f"best_iter={_b.best_iteration}  "
+          f"RMSE={np.sqrt(mean_squared_error(_y_va_raw, _p)):.3f}")
+
+rt_oof_actual    = np.array(rt_oof_actual)
+rt_oof_pred      = np.array(rt_oof_pred)
+rt_oof_years     = np.array(rt_oof_years)
+rt_mean_best_iter = int(np.mean(rt_best_iters))
+print(f"\n  Mean best_iteration across folds: {rt_mean_best_iter}")
+
+# %%
+# --- RT-5.3  OOF metrics: per-year + overall ---
+
+print("\n" + "="*60)
+print(f"RT OOF METRICS (rolling forward CV)  --  {RT_TARGET}")
+print("="*60)
+print(f"  {'Year':<6}  {'N':>5}  {'MAE':>8}  {'RMSE':>8}  {'R2':>8}  {'Bias':>8}")
+print(f"  {'-'*52}")
+
+for _yr in rt_cv_val_years:
+    _mask = rt_oof_years == _yr
+    _m    = _metrics(rt_oof_actual[_mask], rt_oof_pred[_mask], "OOF")
+    print(f"  {_yr:<6}  {_mask.sum():>5}  "
+          f"{_m['MAE']:>8.3f}  {_m['RMSE']:>8.3f}  {_m['R2']:>+8.3f}  {_m['Bias']:>+8.3f}")
+
+_rt_m_overall = _metrics(rt_oof_actual, rt_oof_pred, "OOF-Overall")
+print(f"  {'-'*52}")
+print(f"  {'TOTAL':<6}  {len(rt_oof_actual):>5}  "
+      f"{_rt_m_overall['MAE']:>8.3f}  {_rt_m_overall['RMSE']:>8.3f}  "
+      f"{_rt_m_overall['R2']:>+8.3f}  {_rt_m_overall['Bias']:>+8.3f}")
+
+# %%
+# --- RT-5.4  Final model: train 2006-2023, n_trees = mean best_iter ---
+
+print(f"\n  Final RT model: train 2006-{TRAIN_END}, n_trees={rt_mean_best_iter}")
+
+_y_tr_rt_full  = np.clip(Y_train_rt[RT_TARGET].values.astype(float), 0, None)
+_dtrain_rt_final = lgb.Dataset(X_train_rt, label=_y_tr_rt_full, weight=sample_weights, free_raw_data=False)
+
+rt_booster_final = lgb.train(
+    {**rt_final_params, "metric": "none"},
+    _dtrain_rt_final,
+    num_boost_round=rt_mean_best_iter,
+    callbacks=[log_evaluation(-1)],
+)
+
+_rt_preds_val = np.clip(rt_booster_final.predict(X_val_rt), 0, None)
+_rt_m_val = _metrics(Y_val_rt[RT_TARGET], _rt_preds_val, "LightGBM")
+print(f"  Val 2024 -> MAE={_rt_m_val['MAE']:.3f}  RMSE={_rt_m_val['RMSE']:.3f}  "
+      f"R2={_rt_m_val['R2']:+.3f}  Bias={_rt_m_val['Bias']:+.3f}")
+
+# %%
+# --- RT-5.5  Summary vs baselines ---
+print("\n" + "="*60)
+print(f"RT-PHASE 5 SUMMARY -- {RT_TARGET}")
+print("="*60)
+print(f"  {'Metric':<10}  {'LGB OOF':>10}  {'LGB Val24':>10}  {'Ridge Val24':>12}")
+for metric in ["MAE", "RMSE", "R2"]:
+    print(f"  {metric:<10}  {float(_rt_m_overall[metric]):>10.3f}  "
+          f"{_rt_m_val[metric]:>10.3f}  {_rt_b4[metric]:>12.3f}")
+
+print(f"\nRT-Phase 5 complete.")
+
+# Save to registry
+lgb_models["rushing_tds"]      = rt_booster_final
+best_params_all["rushing_tds"] = rt_best_params
+oof_store["rushing_tds"] = {
+    "oof_actual": rt_oof_actual,
+    "oof_pred":   rt_oof_pred,
+    "oof_years":  rt_oof_years,
+}
+joblib.dump({
+    "lgb_models":     lgb_models,
+    "optuna_studies": optuna_studies,
+    "df_phase5":      pd.DataFrame(phase5_records),
+    "best_params":    best_params_all,
+    "oof_store":      oof_store,
+    "feature_cols":   FEATURE_COLS,
+    "td_feature_cols": TD_FEATURES,
+    "ry_feature_cols": RY_FEATURES,
+    "targets":        TARGETS,
+    "loss_functions": LOSS_FUNCTIONS,
+    "tweedie_power":  TWEEDIE_POWER,
+}, registry_path)
+print(f"  Registry updated.")
+
+# %%
+# =============================================================================
+# RT-PHASE 6  —  EVALUATION & DIAGNOSTICS: rushing_tds
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"RT-PHASE 6  --  EVALUATION: {RT_TARGET}")
+print("="*60)
+
+_rt_preds_test = np.clip(rt_booster_final.predict(X_test_rt), 0, None)
+
+# %%
+# --- RT-6.1  Full metrics table ---
+
+print(f"\n  [{RT_TARGET}]")
+for split, yt, yp in [("Val 2024", Y_val_rt[RT_TARGET].values, _rt_preds_val),
+                      ("Test 2025", Y_test_rt[RT_TARGET].values, _rt_preds_test)]:
+    fm = _full_metrics(yt, yp)
+    print(f"\n  [{split}]")
+    for k, v in fm.items():
+        print(f"    {k:<15}  {v:>10.4f}")
+
+# %%
+# --- RT-6.2  Predicted vs actual scatter ---
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",  Y_val_rt[RT_TARGET].values,  _rt_preds_val),
+    ("Test 2025", Y_test_rt[RT_TARGET].values, _rt_preds_test),
+]):
+    lim = max(yt.max(), yp.max()) * 1.15 + 0.5
+    ax.scatter(yt, yp, alpha=0.25, s=12, color="steelblue", edgecolors="none")
+    ax.plot([0, lim], [0, lim], "r--", lw=1.5, label="Perfect")
+    m_c, b_c = np.polyfit(yt, yp, 1)
+    xs = np.linspace(0, lim, 100)
+    ax.plot(xs, m_c * xs + b_c, "k-", lw=1.2, alpha=0.7, label="OLS fit")
+    r2v   = r2_score(yt, yp)
+    pearr = np.corrcoef(yt, yp)[0, 1]
+    ax.set_title(f"Rushing TDs -- {split}\nR2={r2v:.3f}  r={pearr:.3f}",
+                 fontsize=10, fontweight="bold")
+    ax.set_xlabel("Actual Rushing TDs", fontsize=9)
+    ax.set_ylabel("Predicted Rushing TDs", fontsize=9)
+    ax.legend(fontsize=8)
+    ax.tick_params(labelsize=8)
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{RT_TARGET}_pred_vs_actual.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- RT-6.3  Residual distribution ---
+
+from scipy.stats import gaussian_kde as _gkde_rt, norm as _sp_norm_rt
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",    Y_val_rt[RT_TARGET].values,  _rt_preds_val),
+    ("Test 2025",   Y_test_rt[RT_TARGET].values, _rt_preds_test),
+    ("OOF 2017-23", rt_oof_actual,               rt_oof_pred),
+]):
+    resid = yp - yt
+    ax.hist(resid, bins=40, density=True, color="steelblue", alpha=0.6, edgecolor="white")
+    kde_x = np.linspace(resid.min(), resid.max(), 300)
+    try:
+        ax.plot(kde_x, _gkde_rt(resid)(kde_x), "k-", lw=1.5, label="KDE")
+        ax.plot(kde_x, _sp_norm_rt.pdf(kde_x, resid.mean(), resid.std()), "r--", lw=1.2, alpha=0.8, label="Normal")
+    except Exception:
+        pass
+    ax.axvline(0, color="red", linestyle="--", lw=1.5)
+    ax.set_title(f"Residuals — Rushing TDs {split}\nbias={resid.mean():+.2f}  sd={resid.std():.2f}",
+                 fontsize=10, fontweight="bold")
+    ax.set_xlabel("Residual (pred - actual)", fontsize=9)
+    ax.set_ylabel("Density", fontsize=9)
+    ax.legend(fontsize=8)
+    ax.tick_params(labelsize=8)
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{RT_TARGET}_residuals.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- RT-6.4  Calibration curve ---
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",  Y_val_rt[RT_TARGET].values,  _rt_preds_val),
+    ("Test 2025", Y_test_rt[RT_TARGET].values, _rt_preds_test),
+]):
+    _cal_df = pd.DataFrame({"actual": yt, "pred": yp})
+    try:
+        _cal_df["decile"] = pd.qcut(_cal_df["pred"], q=10, labels=False, duplicates="drop")
+        _cal_grp = _cal_df.groupby("decile").agg(mean_pred=("pred", "mean"), mean_actual=("actual", "mean"))
+        lim = max(_cal_grp["mean_pred"].max(), _cal_grp["mean_actual"].max()) * 1.2
+        ax.plot(_cal_grp["mean_pred"], _cal_grp["mean_actual"], "o-", color="steelblue", lw=1.5)
+        for _, r in _cal_grp.iterrows():
+            ax.annotate(f"{r.name}", (r["mean_pred"], r["mean_actual"]), fontsize=7,
+                        textcoords="offset points", xytext=(4, 2))
+        ax.plot([0, lim], [0, lim], "r--", lw=1.5, label="Perfect calibration")
+        ax.set_title(f"Rushing TDs Calibration -- {split}", fontsize=10, fontweight="bold")
+        ax.set_xlabel("Mean Predicted (decile)", fontsize=9)
+        ax.set_ylabel("Mean Actual", fontsize=9)
+        ax.legend(fontsize=8)
+    except Exception as e:
+        ax.set_title(f"Calibration skipped: {e}")
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{RT_TARGET}_calibration.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- RT-6.5  MAE by week (test 2025) ---
+
+try:
+    _rt_week_df = pd.DataFrame({
+        "week":   df_test["week"].values,
+        "actual": Y_test_rt[RT_TARGET].values,
+        "pred":   _rt_preds_test,
+    })
+    _rt_wk = (_rt_week_df.groupby("week")
+              .apply(lambda g: mean_absolute_error(g["actual"], g["pred"]))
+              .reset_index(name="MAE"))
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(_rt_wk["week"], _rt_wk["MAE"], color="steelblue", edgecolor="white")
+    ax.set_title(f"MAE by Week — Rushing TDs (Test 2025)", fontsize=11, fontweight="bold")
+    ax.set_xlabel("NFL Week", fontsize=9)
+    ax.set_ylabel("MAE", fontsize=9)
+    ax.tick_params(labelsize=8)
+    plt.tight_layout()
+    _fig_path = FIG_DIR / f"phase6_{RT_TARGET}_mae_by_week.png"
+    plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+    plt.close()
+    _show(_fig_path)
+    print(f"  Saved: {_fig_path.name}")
+except Exception as e:
+    print(f"  MAE-by-week skipped: {e}")
+
+# %%
+# --- RT-6.6  Export test predictions ---
+
+_rt_export_df = df_test[["player_display_name", "week", "attempts", "depth_chart_rank"]].copy().reset_index(drop=True)
+_rt_export_df["actual_rushing_tds"]    = Y_test_rt[RT_TARGET].values
+_rt_export_df["predicted_rushing_tds"] = _rt_preds_test
+_rt_export_df["residual"]              = _rt_export_df["predicted_rushing_tds"] - _rt_export_df["actual_rushing_tds"]
+_rt_export_df = _rt_export_df.sort_values(["week", "actual_rushing_tds"], ascending=[True, False]).reset_index(drop=True)
+
+_rt_export_path = DATA_DIR / f"test_predictions_2025_{RT_TARGET}.xlsx"
+_rt_export_df.to_excel(_rt_export_path, index=False)
+print(f"\n  2025 test predictions saved: {_rt_export_path.name}  ({len(_rt_export_df)} rows)")
+print(f"\nRT-Phase 6 complete.")
+
+# %%
+# =============================================================================
+# RT-PHASE 7  —  FEATURE IMPORTANCE & SHAP: rushing_tds
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"RT-PHASE 7  --  FEATURE IMPORTANCE: {RT_TARGET}")
+print("="*60)
+
+# %%
+# --- RT-7.1  LightGBM native gain importance ---
+
+_rt_imp_gain = (
+    pd.Series(rt_booster_final.feature_importance(importance_type="gain"),
+              index=RT_FEATURES_LGB)
+    .sort_values(ascending=False)
+)
+
+fig, ax = plt.subplots(figsize=(10, 8))
+_rt_imp_gain.head(25).plot.barh(ax=ax, color="steelblue", edgecolor="white")
+ax.invert_yaxis()
+ax.set_title(f"LightGBM Gain Importance (top 25) — {RT_TARGET}", fontsize=11, fontweight="bold")
+ax.set_xlabel("Total Gain", fontsize=9)
+ax.tick_params(labelsize=8)
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{RT_TARGET}_gain_importance.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- RT-7.2  SHAP ---
+
+_rt_sample_idx = np.random.default_rng(42).choice(len(X_test_rt), size=min(500, len(X_test_rt)), replace=False)
+_rt_X_shap     = X_test_rt.iloc[_rt_sample_idx].reset_index(drop=True)
+
+_rt_explainer   = _shap_lib.TreeExplainer(rt_booster_final)
+_rt_shap_values = _rt_explainer.shap_values(_rt_X_shap)
+
+_rt_mean_abs_shap = pd.Series(
+    np.abs(_rt_shap_values).mean(axis=0),
+    index=RT_FEATURES_LGB,
+).sort_values(ascending=False)
+
+# Beeswarm
+fig, ax = plt.subplots(figsize=(10, 9))
+_shap_lib.summary_plot(_rt_shap_values, _rt_X_shap, max_display=20, show=False)
+plt.title(f"SHAP Beeswarm — {RT_TARGET} (top 20)", fontsize=11, fontweight="bold")
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{RT_TARGET}_shap_beeswarm.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# Bar plot
+fig, ax = plt.subplots(figsize=(10, 8))
+_rt_mean_abs_shap.head(20).plot.barh(ax=ax, color="darkorange", edgecolor="white")
+ax.invert_yaxis()
+ax.set_title(f"Mean |SHAP| (top 20) — {RT_TARGET}", fontsize=11, fontweight="bold")
+ax.set_xlabel("Mean |SHAP value|", fontsize=9)
+ax.tick_params(labelsize=8)
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{RT_TARGET}_shap_bar.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- RT-7.3  Full importance table (all features) ---
+
+_rt_gain_df = _rt_imp_gain.reset_index(); _rt_gain_df.columns = ["feature", "gain"]
+_rt_shap_df = _rt_mean_abs_shap.reset_index(); _rt_shap_df.columns = ["feature", "mean_abs_shap"]
+_rt_gain_df["gain_rank"] = range(1, len(_rt_gain_df) + 1)
+_rt_shap_df["shap_rank"] = range(1, len(_rt_shap_df) + 1)
+
+_rt_full_imp = _rt_gain_df.merge(_rt_shap_df, on="feature")[
+    ["gain_rank", "shap_rank", "feature", "gain", "mean_abs_shap"]
+].sort_values("shap_rank").reset_index(drop=True)
+
+print(f"\n  {'gain_rank':>10}  {'shap_rank':>10}  {'feature':<55}  {'gain':>14}  {'mean_abs_shap':>14}")
+print(f"  {'-'*105}")
+for _, r in _rt_full_imp.iterrows():
+    print(f"  {int(r['gain_rank']):>10}  {int(r['shap_rank']):>10}  {r['feature']:<55}  "
+          f"{r['gain']:>14.2f}  {r['mean_abs_shap']:>14.6f}")
+
+_rt_imp_path = DATA_DIR / f"feature_importance_{RT_TARGET}.xlsx"
+_rt_full_imp.to_excel(_rt_imp_path, index=False)
+print(f"\n  Full importance saved: {_rt_imp_path.name}")
+print(f"\nRT-Phase 7 complete.")
+
+# %%
+# =============================================================================
+# RT-PHASE 7B  —  SEASON-LEVEL DIAGNOSTICS: rushing_tds (Test 2025)
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"RT-PHASE 7B  --  SEASON-LEVEL DIAGNOSTICS: {RT_TARGET}")
+print("="*60)
+
+_rt_pg = _rt_export_df.copy()
+
+_rt_szn = (
+    _rt_pg.groupby("player_display_name")
+    .agg(
+        games               =("actual_rushing_tds",    "count"),
+        actual_total        =("actual_rushing_tds",    "sum"),
+        predicted_total     =("predicted_rushing_tds", "sum"),
+        depth_chart_rank_min=("depth_chart_rank",      "min"),
+    )
+    .reset_index()
+    .sort_values("actual_total", ascending=False)
+)
+_rt_szn["residual"]  = _rt_szn["predicted_total"] - _rt_szn["actual_total"]
+_rt_szn["pct_error"] = np.where(
+    _rt_szn["actual_total"] == 0, np.nan,
+    (_rt_szn["predicted_total"] - _rt_szn["actual_total"]) / _rt_szn["actual_total"]
+)
+
+_yt_rt_s = _rt_szn["actual_total"].values.astype(float)
+_yp_rt_s = _rt_szn["predicted_total"].values.astype(float)
+_rt_mae_s  = mean_absolute_error(_yt_rt_s, _yp_rt_s)
+_rt_rmse_s = float(np.sqrt(np.mean((_yp_rt_s - _yt_rt_s) ** 2)))
+_rt_r2_s   = float(r2_score(_yt_rt_s, _yp_rt_s))
+_rt_bias_s = float(np.mean(_yp_rt_s - _yt_rt_s))
+_rt_mape_s = float(np.mean(np.abs(_rt_szn["pct_error"].dropna())))
+_rt_r_s    = float(np.corrcoef(_yt_rt_s, _yp_rt_s)[0, 1])
+_rt_w10_s  = float((_rt_szn["pct_error"].abs().dropna() <= 0.10).mean() * 100)
+_rt_w20_s  = float((_rt_szn["pct_error"].abs().dropna() <= 0.20).mean() * 100)
+
+print(f"\n  Season-level fit diagnostics ({len(_rt_szn)} QBs):")
+print(f"  {'MAE (TDs)':<20}  {_rt_mae_s:>10.2f}")
+print(f"  {'RMSE (TDs)':<20}  {_rt_rmse_s:>10.2f}")
+print(f"  {'R2':<20}  {_rt_r2_s:>10.4f}")
+print(f"  {'Bias (pred-act)':<20}  {_rt_bias_s:>10.2f}")
+print(f"  {'MAPE':<20}  {_rt_mape_s:>10.2%}")
+print(f"  {'Pearson r':<20}  {_rt_r_s:>10.4f}")
+print(f"  {'Within 10%':<20}  {_rt_w10_s:>10.1f}%")
+print(f"  {'Within 20%':<20}  {_rt_w20_s:>10.1f}%")
+
+print(f"\n  {'QB':<25}  {'G':>3}  {'Actual':>8}  {'Pred':>8}  {'Resid':>8}  {'Pct Err':>8}  {'DC Rank':>7}")
+print(f"  {'-'*75}")
+for _, row in _rt_szn.iterrows():
+    pct_str = f"{row.pct_error*100:+7.1f}%" if pd.notna(row.pct_error) else "     N/A"
+    print(f"  {row.player_display_name:<25}  {int(row.games):>3}  {row.actual_total:>8.0f}  "
+          f"{row.predicted_total:>8.1f}  {row.residual:>+8.1f}  {pct_str}  {int(row.depth_chart_rank_min):>7}")
+
+_rt_szn_path = DATA_DIR / f"test_predictions_2025_{RT_TARGET}_season_totals.xlsx"
+_rt_szn.to_excel(_rt_szn_path, index=False)
+print(f"\n  Season totals saved: {_rt_szn_path.name}")
+print(f"\nRushing TDs model complete.")
+
+# %%
+# =============================================================================
+# RT-PHASE 7C  —  RIDGE FULL DIAGNOSTICS: rushing_tds (Val 2024 + Test 2025)
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"RT-PHASE 7C  --  RIDGE FULL DIAGNOSTICS: {RT_TARGET}")
+print("="*60)
+
+# Ridge test-2025 predictions (scaler already fit on train in PHASE 4)
+_Xte_rt_r        = X_test_rt_ridge.fillna(_rt_col_medians).fillna(0)
+_Xte_rt_s        = _rt_scaler.transform(_Xte_rt_r)
+_rt_preds_ridge_test = np.clip(_rt_ridge.predict(_Xte_rt_s), 0, None)
+
+# %%
+# --- RT-7C.1  Full metrics table (Ridge, both splits) ---
+
+print(f"\n  [Ridge — {RT_TARGET}]")
+for split, yt, yp in [("Val 2024",  Y_val_rt[RT_TARGET].values,  _rt_preds_ridge),
+                      ("Test 2025", Y_test_rt[RT_TARGET].values, _rt_preds_ridge_test)]:
+    fm = _full_metrics(yt, yp)
+    print(f"\n  [{split}]")
+    for k, v in fm.items():
+        print(f"    {k:<15}  {v:>10.4f}")
+
+# %%
+# --- RT-7C.2  LGB vs Ridge side-by-side summary ---
+
+print("\n" + "="*60)
+print(f"LGB vs Ridge Comparison — {RT_TARGET}")
+print("="*60)
+_rdg_v_m = _metrics(Y_val_rt[RT_TARGET], _rt_preds_ridge, "R")
+_lgb_t_m = _metrics(Y_test_rt[RT_TARGET], _rt_preds_test, "L")
+_rdg_t_m = _metrics(Y_test_rt[RT_TARGET], _rt_preds_ridge_test, "R")
+
+def _pearson(yt, yp):
+    yt, yp = np.asarray(yt, dtype=float), np.asarray(yp, dtype=float)
+    return float(np.corrcoef(yt, yp)[0, 1])
+
+_pearson_row = {
+    "LGB Val24":  _pearson(Y_val_rt[RT_TARGET].values,  _rt_preds_val),
+    "Rdg Val24":  _pearson(Y_val_rt[RT_TARGET].values,  _rt_preds_ridge),
+    "LGB Tst25":  _pearson(Y_test_rt[RT_TARGET].values, _rt_preds_test),
+    "Rdg Tst25":  _pearson(Y_test_rt[RT_TARGET].values, _rt_preds_ridge_test),
+}
+
+print(f"  {'Metric':<12}  {'LGB Val24':>10}  {'Rdg Val24':>10}  {'LGB Tst25':>10}  {'Rdg Tst25':>10}")
+for metric in ["MAE", "RMSE", "R2"]:
+    print(f"  {metric:<12}  {_rt_m_val[metric]:>10.3f}  {_rdg_v_m[metric]:>10.3f}  "
+          f"{_lgb_t_m[metric]:>10.3f}  {_rdg_t_m[metric]:>10.3f}")
+print(f"  {'Pearson_r':<12}  {_pearson_row['LGB Val24']:>10.3f}  {_pearson_row['Rdg Val24']:>10.3f}  "
+      f"  {_pearson_row['LGB Tst25']:>10.3f}  {_pearson_row['Rdg Tst25']:>10.3f}")
+
+# %%
+# --- RT-7C.3  Calibration: Ridge val 2024 and test 2025 ---
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",  Y_val_rt[RT_TARGET].values,  _rt_preds_ridge),
+    ("Test 2025", Y_test_rt[RT_TARGET].values, _rt_preds_ridge_test),
+]):
+    _cal_df = pd.DataFrame({"actual": yt, "pred": yp})
+    try:
+        _cal_df["decile"] = pd.qcut(_cal_df["pred"], q=10, labels=False, duplicates="drop")
+        _cal_grp = _cal_df.groupby("decile").agg(mean_pred=("pred", "mean"), mean_actual=("actual", "mean"))
+        lim = max(_cal_grp["mean_pred"].max(), _cal_grp["mean_actual"].max()) * 1.2
+        ax.plot(_cal_grp["mean_pred"], _cal_grp["mean_actual"], "o-", color="darkorange", lw=1.5)
+        for _, r in _cal_grp.iterrows():
+            ax.annotate(f"{r.name}", (r["mean_pred"], r["mean_actual"]), fontsize=7,
+                        textcoords="offset points", xytext=(4, 2))
+        ax.plot([0, lim], [0, lim], "r--", lw=1.5, label="Perfect calibration")
+        ax.set_title(f"Ridge Calibration — Rushing TDs {split}", fontsize=10, fontweight="bold")
+        ax.set_xlabel("Mean Predicted (decile)", fontsize=9)
+        ax.set_ylabel("Mean Actual", fontsize=9)
+        ax.legend(fontsize=8)
+    except Exception as e:
+        ax.set_title(f"Calibration skipped: {e}")
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7c_{RT_TARGET}_ridge_calibration.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- RT-7C.4  Residuals: Ridge val 2024 and test 2025 ---
+
+from scipy.stats import gaussian_kde as _gkde_rdg, norm as _sp_norm_rdg
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",  Y_val_rt[RT_TARGET].values,  _rt_preds_ridge),
+    ("Test 2025", Y_test_rt[RT_TARGET].values, _rt_preds_ridge_test),
+]):
+    resid = yp - yt
+    ax.hist(resid, bins=40, density=True, color="darkorange", alpha=0.6, edgecolor="white")
+    kde_x = np.linspace(resid.min(), resid.max(), 300)
+    try:
+        ax.plot(kde_x, _gkde_rdg(resid)(kde_x), "k-", lw=1.5, label="KDE")
+        ax.plot(kde_x, _sp_norm_rdg.pdf(kde_x, resid.mean(), resid.std()), "r--", lw=1.2, alpha=0.8, label="Normal")
+    except Exception:
+        pass
+    ax.axvline(0, color="red", linestyle="--", lw=1.5)
+    ax.set_title(f"Ridge Residuals — Rushing TDs {split}\nbias={resid.mean():+.2f}  sd={resid.std():.2f}",
+                 fontsize=10, fontweight="bold")
+    ax.set_xlabel("Residual (pred - actual)", fontsize=9)
+    ax.set_ylabel("Density", fontsize=9)
+    ax.legend(fontsize=8)
+    ax.tick_params(labelsize=8)
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7c_{RT_TARGET}_ridge_residuals.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- RT-7C.5  Ridge season-level diagnostics (Test 2025) ---
+
+_rt_ridge_pg = df_test[["player_display_name", "week", "depth_chart_rank"]].copy().reset_index(drop=True)
+_rt_ridge_pg["actual_rushing_tds"]    = Y_test_rt[RT_TARGET].values
+_rt_ridge_pg["predicted_rushing_tds"] = _rt_preds_ridge_test
+
+_rt_ridge_szn = (
+    _rt_ridge_pg.groupby("player_display_name")
+    .agg(
+        games               =("actual_rushing_tds",    "count"),
+        actual_total        =("actual_rushing_tds",    "sum"),
+        predicted_total     =("predicted_rushing_tds", "sum"),
+        depth_chart_rank_min=("depth_chart_rank",      "min"),
+    )
+    .reset_index()
+    .sort_values("actual_total", ascending=False)
+)
+_rt_ridge_szn["residual"]  = _rt_ridge_szn["predicted_total"] - _rt_ridge_szn["actual_total"]
+_rt_ridge_szn["pct_error"] = np.where(
+    _rt_ridge_szn["actual_total"] == 0, np.nan,
+    (_rt_ridge_szn["predicted_total"] - _rt_ridge_szn["actual_total"]) / _rt_ridge_szn["actual_total"]
+)
+
+_yt_rdg = _rt_ridge_szn["actual_total"].values.astype(float)
+_yp_rdg = _rt_ridge_szn["predicted_total"].values.astype(float)
+_rdg_mae_s  = mean_absolute_error(_yt_rdg, _yp_rdg)
+_rdg_rmse_s = float(np.sqrt(np.mean((_yp_rdg - _yt_rdg) ** 2)))
+_rdg_r2_s   = float(r2_score(_yt_rdg, _yp_rdg))
+_rdg_bias_s = float(np.mean(_yp_rdg - _yt_rdg))
+_rdg_mape_s = float(np.mean(np.abs(_rt_ridge_szn["pct_error"].dropna())))
+_rdg_r_s    = float(np.corrcoef(_yt_rdg, _yp_rdg)[0, 1])
+_rdg_w10_s  = float((_rt_ridge_szn["pct_error"].abs().dropna() <= 0.10).mean() * 100)
+_rdg_w20_s  = float((_rt_ridge_szn["pct_error"].abs().dropna() <= 0.20).mean() * 100)
+
+print(f"\n  [Ridge] Season-level diagnostics ({len(_rt_ridge_szn)} QBs) — Test 2025:")
+print(f"  {'MAE (TDs)':<20}  {_rdg_mae_s:>10.2f}")
+print(f"  {'RMSE (TDs)':<20}  {_rdg_rmse_s:>10.2f}")
+print(f"  {'R2':<20}  {_rdg_r2_s:>10.4f}")
+print(f"  {'Bias (pred-act)':<20}  {_rdg_bias_s:>10.2f}")
+print(f"  {'MAPE':<20}  {_rdg_mape_s:>10.2%}")
+print(f"  {'Pearson r':<20}  {_rdg_r_s:>10.4f}")
+print(f"  {'Within 10%':<20}  {_rdg_w10_s:>10.1f}%")
+print(f"  {'Within 20%':<20}  {_rdg_w20_s:>10.1f}%")
+
+print(f"\n  {'QB':<25}  {'G':>3}  {'Actual':>8}  {'Pred':>8}  {'Resid':>8}  {'Pct Err':>8}  {'DC Rank':>7}")
+print(f"  {'-'*75}")
+for _, row in _rt_ridge_szn.iterrows():
+    pct_str = f"{row.pct_error*100:+7.1f}%" if pd.notna(row.pct_error) else "     N/A"
+    print(f"  {row.player_display_name:<25}  {int(row.games):>3}  {row.actual_total:>8.0f}  "
+          f"{row.predicted_total:>8.1f}  {row.residual:>+8.1f}  {pct_str}  {int(row.depth_chart_rank_min):>7}")
+
+print(f"\nRT-Phase 7C complete.")
+
+# %%
+# =============================================================================
+# IT-PHASE 4-7C  —  interceptions  (MSE + RMSE, same pipeline as rushing_tds)
+# =============================================================================
+
+# %%
+# --- IT Feature set ---
+
+# IT_FEATURES_RIDGE: lean, multicollinearity-clean for Ridge
+# One window per concept (L10/L20/ewm20 only), based on prior SHAP analysis
+IT_FEATURES_RIDGE = [
+    # INT rate
+    "int_rate_L10", "int_rate_L20",
+    "int_rate_ewm10", "int_rate_ewm20",
+
+    # Aggressiveness / deep passing
+    "ngs_aggressiveness_ewm5", "ngs_aggressiveness_ewm20",
+    "ngs_avg_intended_air_yards_L10", "ngs_avg_intended_air_yards_L20",
+    "qb_air_yards_per_attempt_ewm20",
+
+    # Time to throw
+    "ngs_avg_time_to_throw_L10",
+
+    # Pressure
+    "qb_pressure_rate_ewm5", "qb_pressure_rate_ewm20",
+
+    # Receiver / separation
+    "off_wr_separation_L10", "off_wr_separation_L20",
+    "off_wr_epa_per_target_L10",
+    "off_te_epa_per_target_L10", "off_te_epa_per_target_L20",
+
+    # Efficiency
+    "epa_per_opportunity_L20",
+
+    # Volume
+    "off_pass_rate_L10",
+
+    # Opponent pass defense
+    "opp_def_qb_qb_int_rate_L10", "opp_def_qb_qb_int_rate_L20",
+    "opp_def_qb_qb_int_rate_ewm20",
+    "opp_def_qb_qb_cpoe_L10", "opp_def_qb_qb_cpoe_L20",
+    "opp_def_pass_epa_L20",
+    "opp_def_wr_wr_catch_rate_L20",
+    "opp_def_team_team_epa_per_pass_L20",
+
+    # Game environment
+    "game_temp", "game_wind", "game_precip_mm",
+
+    # Context
+    "depth_chart_rank", "age",
+    "fantasy_pts_ewm10", "fantasy_pts_ewm20", "fantasy_pts_per_game_career",
+    "interceptions_per_game_career",
+]
+
+# IT_FEATURES_LGB: 37 features — baseline INT model
+IT_FEATURES_LGB = [
+    # === INT HISTORY (rate only) ===
+    "int_rate_L10", "int_rate_L20",
+    "int_rate_ewm10", "int_rate_ewm20",
+
+    # === AGGRESSIVENESS ===
+    "ngs_aggressiveness_ewm5", "ngs_aggressiveness_ewm10", "ngs_aggressiveness_ewm20",
+
+    # === DEEP PASSING TENDENCY ===
+    "ngs_avg_intended_air_yards_L10", "ngs_avg_intended_air_yards_L20",
+    "qb_air_yards_per_attempt_ewm5", "qb_air_yards_per_attempt_ewm20",
+
+    # === TIME TO THROW ===
+    "ngs_avg_time_to_throw_L10",
+
+    # === PRESSURE (EWM only) ===
+    "qb_pressure_rate_ewm5", "qb_pressure_rate_ewm10", "qb_pressure_rate_ewm20",
+
+    # === RECEIVER / SEPARATION ===
+    "off_wr_separation_L10", "off_wr_separation_L20",
+    "off_wr_epa_per_target_L10",
+    "off_te_epa_per_target_L10", "off_te_epa_per_target_L20",
+
+    # === PASSING EFFICIENCY ===
+    "epa_per_opportunity_L10", "epa_per_opportunity_L20",
+
+    # === VOLUME CONTEXT ===
+    "off_pass_rate_L10",
+
+    # === OPPONENT PASS DEFENSE ===
+    "opp_def_qb_qb_int_rate_L10", "opp_def_qb_qb_int_rate_L20",
+    "opp_def_qb_qb_int_rate_ewm5", "opp_def_qb_qb_int_rate_ewm20",
+    "opp_def_qb_qb_cpoe_L10", "opp_def_qb_qb_cpoe_L20",
+    "opp_def_pass_epa_L20",
+    "opp_def_wr_wr_catch_rate_L20",
+    "opp_def_team_team_epa_per_pass_L10", "opp_def_team_team_epa_per_pass_L20",
+
+    # === GAME ENVIRONMENT ===
+    "game_temp", "game_wind", "game_precip_mm",
+
+    # === PLAYER CONTEXT ===
+    "depth_chart_rank", "age",
+    "fantasy_pts_ewm10", "fantasy_pts_ewm20", "fantasy_pts_per_game_career",
+    "interceptions_per_game_career",
+]
+
+IT_FEATURES_RIDGE = _dedup(IT_FEATURES_RIDGE, qb)
+IT_FEATURES_LGB   = _dedup(IT_FEATURES_LGB,   qb)
+
+print(f"\nIT_FEATURES_RIDGE: {len(IT_FEATURES_RIDGE)} features")
+print(f"IT_FEATURES_LGB:   {len(IT_FEATURES_LGB)} features")
+
+# %%
+# --- Build IT train/val/test splits ---
+
+IT_TARGET = "interceptions"
+
+X_train_it       = df_train[IT_FEATURES_LGB].reset_index(drop=True)
+X_val_it         = df_val[IT_FEATURES_LGB].reset_index(drop=True)
+X_test_it        = df_test[IT_FEATURES_LGB].reset_index(drop=True)
+X_train_it_ridge = df_train[IT_FEATURES_RIDGE].reset_index(drop=True)
+X_val_it_ridge   = df_val[IT_FEATURES_RIDGE].reset_index(drop=True)
+X_test_it_ridge  = df_test[IT_FEATURES_RIDGE].reset_index(drop=True)
+
+Y_train_it = df_train[[IT_TARGET]].reset_index(drop=True)
+Y_val_it   = df_val[[IT_TARGET]].reset_index(drop=True)
+Y_test_it  = df_test[[IT_TARGET]].reset_index(drop=True)
+
+print(f"  LGB:   X_train={X_train_it.shape}  X_val={X_val_it.shape}  X_test={X_test_it.shape}")
+print(f"  Ridge: X_train={X_train_it_ridge.shape}  X_val={X_val_it_ridge.shape}  X_test={X_test_it_ridge.shape}")
+
+# %%
+# --- IT distribution ---
+
+print("\n--- INT distribution (train set) ---")
+_it_counts = df_train[IT_TARGET].value_counts().sort_index()
+for v, n in _it_counts.items():
+    print(f"  {int(v)} INT: {n:5,}  ({n/len(df_train):5.1%})")
+print(f"  Mean: {df_train[IT_TARGET].mean():.3f}  Median: {df_train[IT_TARGET].median():.1f}")
+print(f"  Zero games: {(df_train[IT_TARGET] == 0).mean():.1%}")
+
+# %%
+# --- IT-4.1  Global mean baseline ---
+print("\n--- IT-B1: Global mean ---")
+_it_train_mean = float(Y_train_it[IT_TARGET].mean())
+_it_preds_mean = np.full(len(Y_val_it), _it_train_mean)
+_it_b1 = _metrics(Y_val_it[IT_TARGET], _it_preds_mean, "GlobalMean")
+_it_b1["target"] = IT_TARGET
+print(f"  {IT_TARGET:<25}  MAE={_it_b1['MAE']:.3f}  RMSE={_it_b1['RMSE']:.3f}  R2={_it_b1['R2']:+.3f}  Bias={_it_b1['Bias']:+.3f}")
+
+# %%
+# --- IT-4.2  L1-proxy baseline (interceptions_L3) ---
+print("\n--- IT-B2: L1-proxy (interceptions_L3) ---")
+_col = "interceptions_L3"
+if _col in df_val.columns:
+    _it_preds_l1 = df_val[_col].fillna(_it_train_mean).reset_index(drop=True).values
+else:
+    _it_preds_l1 = np.full(len(Y_val_it), _it_train_mean)
+    print(f"  interceptions_L3 missing -- using global mean fallback")
+_it_preds_l1 = np.clip(_it_preds_l1, 0, None)
+_it_b2 = _metrics(Y_val_it[IT_TARGET], _it_preds_l1, "L1-proxy")
+_it_b2["target"] = IT_TARGET
+print(f"  {IT_TARGET:<25}  MAE={_it_b2['MAE']:.3f}  RMSE={_it_b2['RMSE']:.3f}  R2={_it_b2['R2']:+.3f}  Bias={_it_b2['Bias']:+.3f}")
+
+# %%
+# --- IT-4.3  Rolling L5 mean baseline ---
+print("\n--- IT-B3: Rolling L5 mean (interceptions_L5) ---")
+_col = "interceptions_L5"
+if _col in df_val.columns:
+    _it_preds_l5 = df_val[_col].fillna(_it_train_mean).reset_index(drop=True).values
+else:
+    _it_preds_l5 = np.full(len(Y_val_it), _it_train_mean)
+    print(f"  interceptions_L5 missing -- using global mean fallback")
+_it_preds_l5 = np.clip(_it_preds_l5, 0, None)
+_it_b3 = _metrics(Y_val_it[IT_TARGET], _it_preds_l5, "RollingL5")
+_it_b3["target"] = IT_TARGET
+print(f"  {IT_TARGET:<25}  MAE={_it_b3['MAE']:.3f}  RMSE={_it_b3['RMSE']:.3f}  R2={_it_b3['R2']:+.3f}  Bias={_it_b3['Bias']:+.3f}")
+
+# %%
+# --- IT-4.4  Ridge baseline ---
+print("\n--- IT-B4: Ridge regression ---")
+
+_it_col_medians  = X_train_it_ridge.median().fillna(0)
+_Xtr_it_r        = X_train_it_ridge.fillna(_it_col_medians).fillna(0)
+_Xva_it_r        = X_val_it_ridge.fillna(_it_col_medians).fillna(0)
+
+_it_scaler  = StandardScaler()
+_Xtr_it_s   = _it_scaler.fit_transform(_Xtr_it_r)
+_Xva_it_s   = _it_scaler.transform(_Xva_it_r)
+
+_it_ridge = Ridge(alpha=10.0)
+_it_ridge.fit(_Xtr_it_s, Y_train_it[IT_TARGET].values, sample_weight=sample_weights)
+_it_preds_ridge = np.clip(_it_ridge.predict(_Xva_it_s), 0, None)
+
+_it_b4 = _metrics(Y_val_it[IT_TARGET], _it_preds_ridge, "Ridge")
+_it_b4["target"] = IT_TARGET
+print(f"  {IT_TARGET:<25}  MAE={_it_b4['MAE']:.3f}  RMSE={_it_b4['RMSE']:.3f}  R2={_it_b4['R2']:+.3f}  Bias={_it_b4['Bias']:+.3f}")
+
+_it_coef_df = (
+    pd.DataFrame({"feature": IT_FEATURES_RIDGE, "coefficient": _it_ridge.coef_})
+    .assign(abs_coef=lambda d: d["coefficient"].abs())
+    .sort_values("abs_coef", ascending=False)
+    .drop(columns="abs_coef")
+    .reset_index(drop=True)
+)
+_it_coef_df.index = range(1, len(_it_coef_df) + 1)
+print(f"\n  Ridge coefficients -- {IT_TARGET} (standardized, sorted by |coef|):")
+print(f"  {'Rank':<5} {'Feature':<55} {'Coefficient':>12}")
+print(f"  {'-'*75}")
+for rank, row in _it_coef_df.iterrows():
+    print(f"  {rank:<5} {row['feature']:<55} {row['coefficient']:>+12.4f}")
+
+# %%
+# --- IT-4.5  Baseline summary ---
+df_it_baselines = pd.DataFrame([_it_b1, _it_b2, _it_b3, _it_b4])
+
+print("\n" + "="*60)
+print(f"IT BASELINE SUMMARY -- VAL 2024")
+print("="*60)
+sub = df_it_baselines[["baseline", "MAE", "RMSE", "R2", "Bias"]].set_index("baseline")
+print(sub.to_string(float_format=lambda x: f"{x:+.3f}" if abs(x) < 1000 else f"{x:.3f}"))
+
+# %%
+# =============================================================================
+# IT-PHASE 5  —  LightGBM: interceptions (MSE, rolling forward CV + Optuna)
+# =============================================================================
+
+IT_OOF_FIRST_VAL_YEAR = 2017
+IT_OPTUNA_TUNE_YEAR   = 2023
+IT_N_TRIALS           = 60
+IT_CLIP               = True
+
+print("\n" + "="*60)
+print(f"IT-PHASE 5  --  LightGBM: {IT_TARGET}")
+print("="*60)
+print(f"  objective=regression(MSE)  rolling CV: val {IT_OOF_FIRST_VAL_YEAR}-{IT_OPTUNA_TUNE_YEAR}")
+
+# %%
+# --- IT-5.1  Optuna: tune on train 2006-2022, val 2023 ---
+
+_Xtr_opt_it, _Ytr_opt_it, _sw_opt_it, _Xva_opt_it, _Yva_opt_it = _cv_split(
+    df_train, IT_OPTUNA_TUNE_YEAR, IT_FEATURES_LGB, [IT_TARGET]
+)
+
+_y_tr_opt_it     = np.clip(_Ytr_opt_it[IT_TARGET].values.astype(float), 0, None)
+_y_va_opt_it_raw = np.clip(_Yva_opt_it[IT_TARGET].values.astype(float), 0, None)
+_dtrain_opt_it = lgb.Dataset(_Xtr_opt_it, label=_y_tr_opt_it, weight=_sw_opt_it, free_raw_data=False)
+_dval_opt_it   = lgb.Dataset(_Xva_opt_it, label=_y_va_opt_it_raw, reference=_dtrain_opt_it, free_raw_data=False)
+
+def _make_it_objective(dtrain, dval, X_va, Y_va_raw):
+    def objective_fn(trial):
+        params = {
+            "verbosity":         -1,
+            "objective":         "regression",
+            "metric":            "mse",
+            "num_leaves":        trial.suggest_int("num_leaves", 31, 512),
+            "max_depth":         trial.suggest_int("max_depth", 4, 12),
+            "learning_rate":     trial.suggest_float("learning_rate", 0.005, 0.15, log=True),
+            "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
+            "subsample":         trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree":  trial.suggest_float("colsample_bytree", 0.4, 1.0),
+            "reg_alpha":         trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
+            "reg_lambda":        trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+            "min_split_gain":    trial.suggest_float("min_split_gain", 0.0, 1.0),
+            "extra_trees":       trial.suggest_categorical("extra_trees", [True, False]),
+            "n_jobs": -1, "seed": 42,
+        }
+        _b = lgb.train(
+            params, dtrain,
+            num_boost_round=2000,
+            valid_sets=[dval],
+            callbacks=[early_stopping(50, verbose=False), log_evaluation(-1)],
+        )
+        _preds = np.clip(_b.predict(X_va), 0, None)
+        return float(np.sqrt(np.mean((_preds - Y_va_raw) ** 2)))  # RMSE — cannot be gamed by near-zero predictions
+    return objective_fn
+
+_it_progress = _OptunaProgress(IT_N_TRIALS, IT_TARGET)
+it_study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=42))
+it_study.optimize(
+    _make_it_objective(_dtrain_opt_it, _dval_opt_it, _Xva_opt_it, _y_va_opt_it_raw),
+    n_trials=IT_N_TRIALS,
+    show_progress_bar=False,
+    callbacks=[_it_progress],
+)
+_it_progress.close()
+
+it_best_params = it_study.best_params
+print(f"\n  Optuna best RMSE: {it_study.best_value:.4f}  (trial {it_study.best_trial.number}/{IT_N_TRIALS})")
+print(f"  Best params: {it_best_params}")
+
+# %%
+# --- IT-5.2  Rolling forward CV with best_params ---
+
+it_final_params = {
+    "verbosity": -1,
+    "objective": "regression",
+    "metric": "mse",
+    "n_jobs": -1, "seed": 42,
+    **{k: v for k, v in it_best_params.items() if k != "extra_trees"},
+    "extra_trees": it_best_params["extra_trees"],
+}
+
+it_cv_val_years = list(range(IT_OOF_FIRST_VAL_YEAR, TRAIN_END + 1))
+print(f"\n  Rolling forward CV: {len(it_cv_val_years)} folds  ({it_cv_val_years[0]}-{it_cv_val_years[-1]})")
+
+it_oof_actual = []; it_oof_pred = []; it_oof_years = []; it_best_iters = []
+for _yr in it_cv_val_years:
+    _Xtr, _Ytr, _sw, _Xva, _Yva = _cv_split(df_train, _yr, IT_FEATURES_LGB, [IT_TARGET])
+    _y_tr_raw = np.clip(_Ytr[IT_TARGET].values.astype(float), 0, None)
+    _y_va_raw = np.clip(_Yva[IT_TARGET].values.astype(float), 0, None)
+    _dt = lgb.Dataset(_Xtr, label=_y_tr_raw, weight=_sw, free_raw_data=False)
+    _dv = lgb.Dataset(_Xva, label=_y_va_raw, reference=_dt, free_raw_data=False)
+    _b = lgb.train(
+        it_final_params, _dt,
+        num_boost_round=2000,
+        valid_sets=[_dv],
+        callbacks=[early_stopping(100, verbose=False), log_evaluation(-1)],
+    )
+    _p = np.clip(_b.predict(_Xva), 0, None)
+    it_oof_actual.extend(_y_va_raw.tolist())
+    it_oof_pred.extend(_p.tolist())
+    it_oof_years.extend([_yr] * len(_Yva))
+    it_best_iters.append(_b.best_iteration)
+    print(f"    fold val={_yr}  n_train={len(_Xtr):,}  n_val={len(_Xva):,}  "
+          f"best_iter={_b.best_iteration}  "
+          f"RMSE={np.sqrt(mean_squared_error(_y_va_raw, _p)):.3f}")
+
+it_oof_actual     = np.array(it_oof_actual)
+it_oof_pred       = np.array(it_oof_pred)
+it_oof_years      = np.array(it_oof_years)
+it_mean_best_iter = int(np.mean(it_best_iters))
+print(f"\n  Mean best_iteration across folds: {it_mean_best_iter}")
+
+# %%
+# --- IT-5.3  OOF metrics: per-year + overall ---
+
+print("\n" + "="*60)
+print(f"IT OOF METRICS (rolling forward CV)  --  {IT_TARGET}")
+print("="*60)
+print(f"  {'Year':<6}  {'N':>5}  {'MAE':>8}  {'RMSE':>8}  {'R2':>8}  {'Bias':>8}")
+print(f"  {'-'*52}")
+
+for _yr in it_cv_val_years:
+    _mask = it_oof_years == _yr
+    _m    = _metrics(it_oof_actual[_mask], it_oof_pred[_mask], "OOF")
+    print(f"  {_yr:<6}  {_mask.sum():>5}  "
+          f"{_m['MAE']:>8.3f}  {_m['RMSE']:>8.3f}  {_m['R2']:>+8.3f}  {_m['Bias']:>+8.3f}")
+
+_it_m_overall = _metrics(it_oof_actual, it_oof_pred, "OOF-Overall")
+print(f"  {'-'*52}")
+print(f"  {'TOTAL':<6}  {len(it_oof_actual):>5}  "
+      f"{_it_m_overall['MAE']:>8.3f}  {_it_m_overall['RMSE']:>8.3f}  "
+      f"{_it_m_overall['R2']:>+8.3f}  {_it_m_overall['Bias']:>+8.3f}")
+
+# %%
+# --- IT-5.4  Final model: train 2006-2023, n_trees = mean best_iter ---
+
+print(f"\n  Final IT model: train 2006-{TRAIN_END}, n_trees={it_mean_best_iter}")
+
+_y_tr_it_full  = np.clip(Y_train_it[IT_TARGET].values.astype(float), 0, None)
+_dtrain_it_final = lgb.Dataset(X_train_it, label=_y_tr_it_full, weight=sample_weights, free_raw_data=False)
+
+it_booster_final = lgb.train(
+    {**it_final_params, "metric": "none"},
+    _dtrain_it_final,
+    num_boost_round=it_mean_best_iter,
+    callbacks=[log_evaluation(-1)],
+)
+
+_it_preds_val = np.clip(it_booster_final.predict(X_val_it), 0, None)
+_it_m_val = _metrics(Y_val_it[IT_TARGET], _it_preds_val, "LightGBM")
+print(f"  Val 2024 -> MAE={_it_m_val['MAE']:.3f}  RMSE={_it_m_val['RMSE']:.3f}  "
+      f"R2={_it_m_val['R2']:+.3f}  Bias={_it_m_val['Bias']:+.3f}")
+
+# %%
+# --- IT-5.5  Summary vs baselines ---
+print("\n" + "="*60)
+print(f"IT-PHASE 5 SUMMARY -- {IT_TARGET}")
+print("="*60)
+print(f"  {'Metric':<10}  {'LGB OOF':>10}  {'LGB Val24':>10}  {'Ridge Val24':>12}")
+for metric in ["MAE", "RMSE", "R2"]:
+    print(f"  {metric:<10}  {float(_it_m_overall[metric]):>10.3f}  "
+          f"{_it_m_val[metric]:>10.3f}  {_it_b4[metric]:>12.3f}")
+
+print(f"\nIT-Phase 5 complete.")
+
+# %%
+# =============================================================================
+# IT-PHASE 6  —  EVALUATION & DIAGNOSTICS: interceptions
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"IT-PHASE 6  --  EVALUATION: {IT_TARGET}")
+print("="*60)
+
+_it_preds_test = np.clip(it_booster_final.predict(X_test_it), 0, None)
+
+# %%
+# --- IT-6.1  Full metrics table ---
+
+print(f"\n  [{IT_TARGET}]")
+for split, yt, yp in [("Val 2024",  Y_val_it[IT_TARGET].values,  _it_preds_val),
+                      ("Test 2025", Y_test_it[IT_TARGET].values, _it_preds_test)]:
+    fm = _full_metrics(yt, yp)
+    print(f"\n  [{split}]")
+    for k, v in fm.items():
+        print(f"    {k:<15}  {v:>10.4f}")
+
+# %%
+# --- IT-6.2  Predicted vs actual scatter ---
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",  Y_val_it[IT_TARGET].values,  _it_preds_val),
+    ("Test 2025", Y_test_it[IT_TARGET].values, _it_preds_test),
+]):
+    lim = max(yt.max(), yp.max()) * 1.15 + 0.5
+    ax.scatter(yt, yp, alpha=0.25, s=12, color="steelblue", edgecolors="none")
+    ax.plot([0, lim], [0, lim], "r--", lw=1.5, label="Perfect")
+    m_c, b_c = np.polyfit(yt, yp, 1)
+    xs = np.linspace(0, lim, 100)
+    ax.plot(xs, m_c * xs + b_c, "k-", lw=1.2, alpha=0.7, label="OLS fit")
+    r2v   = r2_score(yt, yp)
+    pearr = np.corrcoef(yt, yp)[0, 1]
+    ax.set_title(f"Interceptions -- {split}\nR2={r2v:.3f}  r={pearr:.3f}",
+                 fontsize=10, fontweight="bold")
+    ax.set_xlabel("Actual Interceptions", fontsize=9)
+    ax.set_ylabel("Predicted Interceptions", fontsize=9)
+    ax.legend(fontsize=8)
+    ax.tick_params(labelsize=8)
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{IT_TARGET}_pred_vs_actual.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- IT-6.3  Residual distribution ---
+
+from scipy.stats import gaussian_kde as _gkde_it, norm as _sp_norm_it
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",    Y_val_it[IT_TARGET].values,  _it_preds_val),
+    ("Test 2025",   Y_test_it[IT_TARGET].values, _it_preds_test),
+    ("OOF 2017-23", it_oof_actual,               it_oof_pred),
+]):
+    resid = yp - yt
+    ax.hist(resid, bins=40, density=True, color="steelblue", alpha=0.6, edgecolor="white")
+    kde_x = np.linspace(resid.min(), resid.max(), 300)
+    try:
+        ax.plot(kde_x, _gkde_it(resid)(kde_x), "k-", lw=1.5, label="KDE")
+        ax.plot(kde_x, _sp_norm_it.pdf(kde_x, resid.mean(), resid.std()), "r--", lw=1.2, alpha=0.8, label="Normal")
+    except Exception:
+        pass
+    ax.axvline(0, color="red", linestyle="--", lw=1.5)
+    ax.set_title(f"Residuals -- Interceptions {split}\nbias={resid.mean():+.2f}  sd={resid.std():.2f}",
+                 fontsize=10, fontweight="bold")
+    ax.set_xlabel("Residual (pred - actual)", fontsize=9)
+    ax.set_ylabel("Density", fontsize=9)
+    ax.legend(fontsize=8)
+    ax.tick_params(labelsize=8)
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{IT_TARGET}_residuals.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- IT-6.4  Calibration curve ---
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",  Y_val_it[IT_TARGET].values,  _it_preds_val),
+    ("Test 2025", Y_test_it[IT_TARGET].values, _it_preds_test),
+]):
+    _cal_df = pd.DataFrame({"actual": yt, "pred": yp})
+    try:
+        _cal_df["decile"] = pd.qcut(_cal_df["pred"], q=10, labels=False, duplicates="drop")
+        _cal_grp = _cal_df.groupby("decile").agg(mean_pred=("pred", "mean"), mean_actual=("actual", "mean"))
+        lim = max(_cal_grp["mean_pred"].max(), _cal_grp["mean_actual"].max()) * 1.2
+        ax.plot(_cal_grp["mean_pred"], _cal_grp["mean_actual"], "o-", color="steelblue", lw=1.5)
+        for _, r in _cal_grp.iterrows():
+            ax.annotate(f"{r.name}", (r["mean_pred"], r["mean_actual"]), fontsize=7,
+                        textcoords="offset points", xytext=(4, 2))
+        ax.plot([0, lim], [0, lim], "r--", lw=1.5, label="Perfect calibration")
+        ax.set_title(f"Interceptions Calibration -- {split}", fontsize=10, fontweight="bold")
+        ax.set_xlabel("Mean Predicted (decile)", fontsize=9)
+        ax.set_ylabel("Mean Actual", fontsize=9)
+        ax.legend(fontsize=8)
+    except Exception as e:
+        ax.set_title(f"Calibration skipped: {e}")
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{IT_TARGET}_calibration.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- IT-6.5  MAE by week (test 2025) ---
+
+try:
+    _it_week_df = pd.DataFrame({
+        "week":   df_test["week"].values,
+        "actual": Y_test_it[IT_TARGET].values,
+        "pred":   _it_preds_test,
+    })
+    _it_wk = (_it_week_df.groupby("week")
+              .apply(lambda g: mean_absolute_error(g["actual"], g["pred"]))
+              .reset_index(name="MAE"))
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(_it_wk["week"], _it_wk["MAE"], color="steelblue", edgecolor="white")
+    ax.set_title(f"MAE by Week -- Interceptions (Test 2025)", fontsize=11, fontweight="bold")
+    ax.set_xlabel("NFL Week", fontsize=9)
+    ax.set_ylabel("MAE", fontsize=9)
+    ax.tick_params(labelsize=8)
+    plt.tight_layout()
+    _fig_path = FIG_DIR / f"phase6_{IT_TARGET}_mae_by_week.png"
+    plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+    plt.close()
+    _show(_fig_path)
+    print(f"  Saved: {_fig_path.name}")
+except Exception as e:
+    print(f"  MAE-by-week skipped: {e}")
+
+# %%
+# --- IT-6.6  Export test predictions ---
+
+_it_export_df = df_test[["player_display_name", "week", "attempts", "depth_chart_rank"]].copy().reset_index(drop=True)
+_it_export_df["actual_interceptions"]    = Y_test_it[IT_TARGET].values
+_it_export_df["predicted_interceptions"] = _it_preds_test
+_it_export_df["residual"]                = _it_export_df["predicted_interceptions"] - _it_export_df["actual_interceptions"]
+_it_export_df = _it_export_df.sort_values(["week", "actual_interceptions"], ascending=[True, False]).reset_index(drop=True)
+
+_it_export_path = DATA_DIR / f"test_predictions_2025_{IT_TARGET}.xlsx"
+_it_export_df.to_excel(_it_export_path, index=False)
+print(f"\n  2025 test predictions saved: {_it_export_path.name}  ({len(_it_export_df)} rows)")
+print(f"\nIT-Phase 6 complete.")
+
+# %%
+# =============================================================================
+# IT-PHASE 7  —  FEATURE IMPORTANCE & SHAP: interceptions
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"IT-PHASE 7  --  FEATURE IMPORTANCE: {IT_TARGET}")
+print("="*60)
+
+# %%
+# --- IT-7.1  LightGBM native gain importance ---
+
+_it_imp_gain = (
+    pd.Series(it_booster_final.feature_importance(importance_type="gain"),
+              index=IT_FEATURES_LGB)
+    .sort_values(ascending=False)
+)
+
+fig, ax = plt.subplots(figsize=(10, 8))
+_it_imp_gain.head(25).plot.barh(ax=ax, color="steelblue", edgecolor="white")
+ax.invert_yaxis()
+ax.set_title(f"LightGBM Gain Importance (top 25) -- {IT_TARGET}", fontsize=11, fontweight="bold")
+ax.set_xlabel("Total Gain", fontsize=9)
+ax.tick_params(labelsize=8)
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{IT_TARGET}_gain_importance.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- IT-7.2  SHAP ---
+
+_it_sample_idx = np.random.default_rng(42).choice(len(X_test_it), size=min(500, len(X_test_it)), replace=False)
+_it_X_shap     = X_test_it.iloc[_it_sample_idx].reset_index(drop=True)
+
+_it_explainer   = _shap_lib.TreeExplainer(it_booster_final)
+_it_shap_values = _it_explainer.shap_values(_it_X_shap)
+
+_it_mean_abs_shap = pd.Series(
+    np.abs(_it_shap_values).mean(axis=0),
+    index=IT_FEATURES_LGB,
+).sort_values(ascending=False)
+
+fig, ax = plt.subplots(figsize=(10, 9))
+_shap_lib.summary_plot(_it_shap_values, _it_X_shap, max_display=20, show=False)
+plt.title(f"SHAP Beeswarm -- {IT_TARGET} (top 20)", fontsize=11, fontweight="bold")
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{IT_TARGET}_shap_beeswarm.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+fig, ax = plt.subplots(figsize=(10, 8))
+_it_mean_abs_shap.head(20).plot.barh(ax=ax, color="darkorange", edgecolor="white")
+ax.invert_yaxis()
+ax.set_title(f"Mean |SHAP| (top 20) -- {IT_TARGET}", fontsize=11, fontweight="bold")
+ax.set_xlabel("Mean |SHAP value|", fontsize=9)
+ax.tick_params(labelsize=8)
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{IT_TARGET}_shap_bar.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- IT-7.3  Full importance table ---
+
+_it_gain_df = _it_imp_gain.reset_index(); _it_gain_df.columns = ["feature", "gain"]
+_it_shap_df = _it_mean_abs_shap.reset_index(); _it_shap_df.columns = ["feature", "mean_abs_shap"]
+_it_gain_df["gain_rank"] = range(1, len(_it_gain_df) + 1)
+_it_shap_df["shap_rank"] = range(1, len(_it_shap_df) + 1)
+
+_it_full_imp = _it_gain_df.merge(_it_shap_df, on="feature")[
+    ["gain_rank", "shap_rank", "feature", "gain", "mean_abs_shap"]
+].sort_values("shap_rank").reset_index(drop=True)
+
+print(f"\n  {'gain_rank':>10}  {'shap_rank':>10}  {'feature':<55}  {'gain':>14}  {'mean_abs_shap':>14}")
+print(f"  {'-'*105}")
+for _, r in _it_full_imp.iterrows():
+    print(f"  {int(r['gain_rank']):>10}  {int(r['shap_rank']):>10}  {r['feature']:<55}  "
+          f"{r['gain']:>14.2f}  {r['mean_abs_shap']:>14.6f}")
+
+_it_imp_path = DATA_DIR / f"feature_importance_{IT_TARGET}.xlsx"
+_it_full_imp.to_excel(_it_imp_path, index=False)
+print(f"\n  Full importance saved: {_it_imp_path.name}")
+print(f"\nIT-Phase 7 complete.")
+
+# %%
+# =============================================================================
+# IT-PHASE 7B  —  SEASON-LEVEL DIAGNOSTICS: interceptions (Test 2025)
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"IT-PHASE 7B  --  SEASON-LEVEL DIAGNOSTICS: {IT_TARGET}")
+print("="*60)
+
+_it_szn = (
+    _it_export_df.groupby("player_display_name")
+    .agg(
+        games               =("actual_interceptions",    "count"),
+        actual_total        =("actual_interceptions",    "sum"),
+        predicted_total     =("predicted_interceptions", "sum"),
+        depth_chart_rank_min=("depth_chart_rank",        "min"),
+    )
+    .reset_index()
+    .sort_values("actual_total", ascending=False)
+)
+_it_szn["residual"]  = _it_szn["predicted_total"] - _it_szn["actual_total"]
+_it_szn["pct_error"] = np.where(
+    _it_szn["actual_total"] == 0, np.nan,
+    (_it_szn["predicted_total"] - _it_szn["actual_total"]) / _it_szn["actual_total"]
+)
+
+_yt_it_s = _it_szn["actual_total"].values.astype(float)
+_yp_it_s = _it_szn["predicted_total"].values.astype(float)
+_it_mae_s  = mean_absolute_error(_yt_it_s, _yp_it_s)
+_it_rmse_s = float(np.sqrt(np.mean((_yp_it_s - _yt_it_s) ** 2)))
+_it_r2_s   = float(r2_score(_yt_it_s, _yp_it_s))
+_it_bias_s = float(np.mean(_yp_it_s - _yt_it_s))
+_it_mape_s = float(np.mean(np.abs(_it_szn["pct_error"].dropna())))
+_it_r_s    = float(np.corrcoef(_yt_it_s, _yp_it_s)[0, 1])
+_it_w10_s  = float((_it_szn["pct_error"].abs().dropna() <= 0.10).mean() * 100)
+_it_w20_s  = float((_it_szn["pct_error"].abs().dropna() <= 0.20).mean() * 100)
+
+print(f"\n  Season-level fit diagnostics ({len(_it_szn)} QBs):")
+print(f"  {'MAE (INTs)':<20}  {_it_mae_s:>10.2f}")
+print(f"  {'RMSE (INTs)':<20}  {_it_rmse_s:>10.2f}")
+print(f"  {'R2':<20}  {_it_r2_s:>10.4f}")
+print(f"  {'Bias (pred-act)':<20}  {_it_bias_s:>10.2f}")
+print(f"  {'MAPE':<20}  {_it_mape_s:>10.2%}")
+print(f"  {'Pearson r':<20}  {_it_r_s:>10.4f}")
+print(f"  {'Within 10%':<20}  {_it_w10_s:>10.1f}%")
+print(f"  {'Within 20%':<20}  {_it_w20_s:>10.1f}%")
+
+print(f"\n  {'QB':<25}  {'G':>3}  {'Actual':>8}  {'Pred':>8}  {'Resid':>8}  {'Pct Err':>8}  {'DC Rank':>7}")
+print(f"  {'-'*75}")
+for _, row in _it_szn.iterrows():
+    pct_str = f"{row.pct_error*100:+7.1f}%" if pd.notna(row.pct_error) else "     N/A"
+    print(f"  {row.player_display_name:<25}  {int(row.games):>3}  {row.actual_total:>8.0f}  "
+          f"{row.predicted_total:>8.1f}  {row.residual:>+8.1f}  {pct_str}  {int(row.depth_chart_rank_min):>7}")
+
+_it_szn_path = DATA_DIR / f"test_predictions_2025_{IT_TARGET}_season_totals.xlsx"
+_it_szn.to_excel(_it_szn_path, index=False)
+print(f"\n  Season totals saved: {_it_szn_path.name}")
+print(f"\nIT-Phase 7B complete.")
+
+# %%
+# =============================================================================
+# IT-PHASE 7C  —  RIDGE FULL DIAGNOSTICS: interceptions (Val 2024 + Test 2025)
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"IT-PHASE 7C  --  RIDGE FULL DIAGNOSTICS: {IT_TARGET}")
+print("="*60)
+
+_Xte_it_r        = X_test_it_ridge.fillna(_it_col_medians).fillna(0)
+_Xte_it_s        = _it_scaler.transform(_Xte_it_r)
+_it_preds_ridge_test = np.clip(_it_ridge.predict(_Xte_it_s), 0, None)
+
+print(f"\n  [Ridge -- {IT_TARGET}]")
+for split, yt, yp in [("Val 2024",  Y_val_it[IT_TARGET].values,  _it_preds_ridge),
+                      ("Test 2025", Y_test_it[IT_TARGET].values, _it_preds_ridge_test)]:
+    fm = _full_metrics(yt, yp)
+    print(f"\n  [{split}]")
+    for k, v in fm.items():
+        print(f"    {k:<15}  {v:>10.4f}")
+
+# %%
+# --- IT-7C.1  Calibration: Ridge ---
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",  Y_val_it[IT_TARGET].values,  _it_preds_ridge),
+    ("Test 2025", Y_test_it[IT_TARGET].values, _it_preds_ridge_test),
+]):
+    _cal_df = pd.DataFrame({"actual": yt, "pred": yp})
+    try:
+        _cal_df["decile"] = pd.qcut(_cal_df["pred"], q=10, labels=False, duplicates="drop")
+        _cal_grp = _cal_df.groupby("decile").agg(mean_pred=("pred", "mean"), mean_actual=("actual", "mean"))
+        lim = max(_cal_grp["mean_pred"].max(), _cal_grp["mean_actual"].max()) * 1.2
+        ax.plot(_cal_grp["mean_pred"], _cal_grp["mean_actual"], "o-", color="tomato", lw=1.5)
+        ax.plot([0, lim], [0, lim], "r--", lw=1.5, label="Perfect calibration")
+        ax.set_title(f"Ridge Interceptions Calibration -- {split}", fontsize=10, fontweight="bold")
+        ax.set_xlabel("Mean Predicted (decile)", fontsize=9)
+        ax.set_ylabel("Mean Actual", fontsize=9)
+        ax.legend(fontsize=8)
+    except Exception as e:
+        ax.set_title(f"Calibration skipped: {e}")
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7c_{IT_TARGET}_ridge_calibration.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- IT-7C.2  LGB vs Ridge comparison ---
+
+_it_lgb_val  = _full_metrics(Y_val_it[IT_TARGET].values,  _it_preds_val)
+_it_lgb_test = _full_metrics(Y_test_it[IT_TARGET].values, _it_preds_test)
+_it_rdg_val  = _full_metrics(Y_val_it[IT_TARGET].values,  _it_preds_ridge)
+_it_rdg_test = _full_metrics(Y_test_it[IT_TARGET].values, _it_preds_ridge_test)
+
+print(f"\n{'='*60}")
+print(f"LGB vs Ridge Comparison -- {IT_TARGET}")
+print(f"{'='*60}")
+print(f"  {'Metric':<12}  {'LGB Val24':>10}  {'Rdg Val24':>10}  {'LGB Tst25':>10}  {'Rdg Tst25':>10}")
+for metric in ["MAE", "RMSE", "R2", "Pearson_r"]:
+    print(f"  {metric:<12}  {_it_lgb_val[metric]:>10.3f}  {_it_rdg_val[metric]:>10.3f}  "
+          f"  {_it_lgb_test[metric]:>10.3f}  {_it_rdg_test[metric]:>10.3f}")
+
+# %%
+# --- IT-7C.3  Ridge season-level diagnostics (Test 2025) ---
+
+_it_ridge_szn_df = df_test[["player_display_name", "week", "depth_chart_rank"]].copy().reset_index(drop=True)
+_it_ridge_szn_df["actual_interceptions"]    = Y_test_it[IT_TARGET].values
+_it_ridge_szn_df["predicted_interceptions"] = _it_preds_ridge_test
+
+_it_ridge_szn = (
+    _it_ridge_szn_df.groupby("player_display_name")
+    .agg(
+        games               =("actual_interceptions",    "count"),
+        actual_total        =("actual_interceptions",    "sum"),
+        predicted_total     =("predicted_interceptions", "sum"),
+        depth_chart_rank_min=("depth_chart_rank",        "min"),
+    )
+    .reset_index()
+    .sort_values("actual_total", ascending=False)
+)
+_it_ridge_szn["residual"]  = _it_ridge_szn["predicted_total"] - _it_ridge_szn["actual_total"]
+_it_ridge_szn["pct_error"] = np.where(
+    _it_ridge_szn["actual_total"] == 0, np.nan,
+    (_it_ridge_szn["predicted_total"] - _it_ridge_szn["actual_total"]) / _it_ridge_szn["actual_total"]
+)
+
+_yt_rdg_it = _it_ridge_szn["actual_total"].values.astype(float)
+_yp_rdg_it = _it_ridge_szn["predicted_total"].values.astype(float)
+_rdg_it_mae_s  = mean_absolute_error(_yt_rdg_it, _yp_rdg_it)
+_rdg_it_rmse_s = float(np.sqrt(np.mean((_yp_rdg_it - _yt_rdg_it) ** 2)))
+_rdg_it_r2_s   = float(r2_score(_yt_rdg_it, _yp_rdg_it))
+_rdg_it_bias_s = float(np.mean(_yp_rdg_it - _yt_rdg_it))
+_rdg_it_mape_s = float(np.mean(np.abs(_it_ridge_szn["pct_error"].dropna())))
+_rdg_it_r_s    = float(np.corrcoef(_yt_rdg_it, _yp_rdg_it)[0, 1])
+_rdg_it_w10_s  = float((_it_ridge_szn["pct_error"].abs().dropna() <= 0.10).mean() * 100)
+_rdg_it_w20_s  = float((_it_ridge_szn["pct_error"].abs().dropna() <= 0.20).mean() * 100)
+
+print(f"\n  [Ridge] Season-level diagnostics ({len(_it_ridge_szn)} QBs) -- Test 2025:")
+print(f"  {'MAE (INTs)':<20}  {_rdg_it_mae_s:>10.2f}")
+print(f"  {'RMSE (INTs)':<20}  {_rdg_it_rmse_s:>10.2f}")
+print(f"  {'R2':<20}  {_rdg_it_r2_s:>10.4f}")
+print(f"  {'Bias (pred-act)':<20}  {_rdg_it_bias_s:>10.2f}")
+print(f"  {'MAPE':<20}  {_rdg_it_mape_s:>10.2%}")
+print(f"  {'Pearson r':<20}  {_rdg_it_r_s:>10.4f}")
+print(f"  {'Within 10%':<20}  {_rdg_it_w10_s:>10.1f}%")
+print(f"  {'Within 20%':<20}  {_rdg_it_w20_s:>10.1f}%")
+
+print(f"\n  {'QB':<25}  {'G':>3}  {'Actual':>8}  {'Pred':>8}  {'Resid':>8}  {'Pct Err':>8}  {'DC Rank':>7}")
+print(f"  {'-'*75}")
+for _, row in _it_ridge_szn.iterrows():
+    pct_str = f"{row.pct_error*100:+7.1f}%" if pd.notna(row.pct_error) else "     N/A"
+    print(f"  {row.player_display_name:<25}  {int(row.games):>3}  {row.actual_total:>8.0f}  "
+          f"{row.predicted_total:>8.1f}  {row.residual:>+8.1f}  {pct_str}  {int(row.depth_chart_rank_min):>7}")
+
+print(f"\nIT-Phase 7C complete.")
+
+# %%
+# =============================================================================
+# FT-PHASE 4-7C  —  fumbles_lost_total  (MSE + RMSE, same pipeline as IT)
+# =============================================================================
+
+# %%
+# --- FT Feature set ---
+
+FT_FEATURES_RIDGE = [
+    # Fumble history
+    "fumbles_lost_total_L10", "fumbles_lost_total_ewm10", "fumbles_lost_total_ewm20",
+
+    # Volume / scramble
+    "carries_ewm10",
+    "qb_scramble_rate_ewm10",
+
+    # Pressure
+    "qb_pressure_rate_ewm10",
+    "off_qb_pressure_rate_L10",
+
+    # Efficiency
+    "epa_per_dropback_ewm10",
+
+    # Opponent fumble defense
+    "opp_def_team_team_fumbles_forced_L10", "opp_def_team_team_fumbles_forced_ewm10",
+
+    # Opponent pass defense context
+    "opp_def_team_team_epa_per_pass_L20",
+
+    # Game environment
+    "game_precip_mm", "game_temp", "game_wind",
+
+    # Player context
+    "depth_chart_rank", "age",
+    "fantasy_pts_ewm10", "fantasy_pts_ewm20", "fantasy_pts_per_game_career",
+    "fumbles_lost_per_game_career",
+]
+
+FT_FEATURES_LGB = [
+    # === FUMBLE HISTORY ===
+    "fumbles_lost_total_L10", "fumbles_lost_total_L20",
+    "fumbles_lost_total_ewm5", "fumbles_lost_total_ewm10", "fumbles_lost_total_ewm20",
+
+    # === CARRIES (exposure) ===
+    "carries_L10",
+    "carries_ewm5", "carries_ewm10", "carries_ewm20",
+
+    # === RUSHING YARDS ===
+    "rushing_yards_L5", "rushing_yards_L10",
+    "rushing_yards_ewm5", "rushing_yards_ewm10",
+
+    # === RUSHING EPA ===
+    "rushing_epa_L5", "rushing_epa_L10", "rushing_epa_L20",
+    "rushing_epa_ewm5", "rushing_epa_ewm10", "rushing_epa_ewm20",
+
+    # === PRESSURE (EWM only for QB, all windows for team) ===
+    "qb_pressure_rate_ewm5", "qb_pressure_rate_ewm10", "qb_pressure_rate_ewm20",
+    "off_qb_pressure_rate_L5", "off_qb_pressure_rate_L10", "off_qb_pressure_rate_L20",
+
+    # === VOLUME / SCHEME ===
+    "off_pass_rate_L10",
+
+    # === EFFICIENCY ===
+    "epa_per_dropback_L10", "epa_per_dropback_L20",
+    "epa_per_dropback_ewm5", "epa_per_dropback_ewm10", "epa_per_dropback_ewm20",
+
+    # === OPPONENT FUMBLE DEFENSE (EWM only — rolling windows were dead) ===
+    "opp_def_team_team_fumbles_forced_ewm5", "opp_def_team_team_fumbles_forced_ewm10",
+    "opp_def_team_team_fumbles_forced_ewm20",
+
+    # === OPPONENT PASS/RUSH DEFENSE ===
+    "opp_def_team_team_epa_per_pass_L10", "opp_def_team_team_epa_per_pass_L20",
+    "opp_def_team_team_epa_per_rush_L20",
+
+    # === GAME ENVIRONMENT ===
+    "game_precip_mm", "game_temp", "game_wind",
+
+    # === PLAYER CONTEXT ===
+    "depth_chart_rank", "age",
+    "fantasy_pts_ewm10", "fantasy_pts_ewm20", "fantasy_pts_per_game_career",
+    "fumbles_lost_per_game_career",
+]
+
+FT_FEATURES_RIDGE = _dedup(FT_FEATURES_RIDGE, qb)
+FT_FEATURES_LGB   = _dedup(FT_FEATURES_LGB,   qb)
+
+print(f"\nFT_FEATURES_RIDGE: {len(FT_FEATURES_RIDGE)} features")
+print(f"FT_FEATURES_LGB:   {len(FT_FEATURES_LGB)} features")
+
+# %%
+# --- Build FT train/val/test splits ---
+
+FT_TARGET = "fumbles_lost_total"
+
+X_train_ft       = df_train[FT_FEATURES_LGB].reset_index(drop=True)
+X_val_ft         = df_val[FT_FEATURES_LGB].reset_index(drop=True)
+X_test_ft        = df_test[FT_FEATURES_LGB].reset_index(drop=True)
+X_train_ft_ridge = df_train[FT_FEATURES_RIDGE].reset_index(drop=True)
+X_val_ft_ridge   = df_val[FT_FEATURES_RIDGE].reset_index(drop=True)
+X_test_ft_ridge  = df_test[FT_FEATURES_RIDGE].reset_index(drop=True)
+
+Y_train_ft = df_train[[FT_TARGET]].reset_index(drop=True)
+Y_val_ft   = df_val[[FT_TARGET]].reset_index(drop=True)
+Y_test_ft  = df_test[[FT_TARGET]].reset_index(drop=True)
+
+print(f"  LGB:   X_train={X_train_ft.shape}  X_val={X_val_ft.shape}  X_test={X_test_ft.shape}")
+print(f"  Ridge: X_train={X_train_ft_ridge.shape}  X_val={X_val_ft_ridge.shape}  X_test={X_test_ft_ridge.shape}")
+
+# %%
+# --- FT distribution ---
+
+print("\n--- Fumble distribution (train set) ---")
+_ft_counts = df_train[FT_TARGET].value_counts().sort_index()
+for v, n in _ft_counts.items():
+    print(f"  {int(v)} fumbles: {n:5,}  ({n/len(df_train):5.1%})")
+print(f"  Mean: {df_train[FT_TARGET].mean():.3f}  Median: {df_train[FT_TARGET].median():.1f}")
+print(f"  Zero games: {(df_train[FT_TARGET] == 0).mean():.1%}")
+
+# %%
+# --- FT-4.1  Global mean baseline ---
+print("\n--- FT-B1: Global mean ---")
+_ft_train_mean = float(Y_train_ft[FT_TARGET].mean())
+_ft_preds_mean = np.full(len(Y_val_ft), _ft_train_mean)
+_ft_b1 = _metrics(Y_val_ft[FT_TARGET], _ft_preds_mean, "GlobalMean")
+_ft_b1["target"] = FT_TARGET
+print(f"  {FT_TARGET:<25}  MAE={_ft_b1['MAE']:.3f}  RMSE={_ft_b1['RMSE']:.3f}  R2={_ft_b1['R2']:+.3f}  Bias={_ft_b1['Bias']:+.3f}")
+
+# %%
+# --- FT-4.2  L1-proxy baseline (fumbles_lost_total_L3) ---
+print("\n--- FT-B2: L1-proxy (fumbles_lost_total_L3) ---")
+_col = "fumbles_lost_total_L3"
+if _col in df_val.columns:
+    _ft_preds_l1 = df_val[_col].fillna(_ft_train_mean).reset_index(drop=True).values
+else:
+    _ft_preds_l1 = np.full(len(Y_val_ft), _ft_train_mean)
+    print(f"  fumbles_lost_total_L3 missing -- using global mean fallback")
+_ft_preds_l1 = np.clip(_ft_preds_l1, 0, None)
+_ft_b2 = _metrics(Y_val_ft[FT_TARGET], _ft_preds_l1, "L1-proxy")
+_ft_b2["target"] = FT_TARGET
+print(f"  {FT_TARGET:<25}  MAE={_ft_b2['MAE']:.3f}  RMSE={_ft_b2['RMSE']:.3f}  R2={_ft_b2['R2']:+.3f}  Bias={_ft_b2['Bias']:+.3f}")
+
+# %%
+# --- FT-4.3  Rolling L5 mean baseline ---
+print("\n--- FT-B3: Rolling L5 mean (fumbles_lost_total_L5) ---")
+_col = "fumbles_lost_total_L5"
+if _col in df_val.columns:
+    _ft_preds_l5 = df_val[_col].fillna(_ft_train_mean).reset_index(drop=True).values
+else:
+    _ft_preds_l5 = np.full(len(Y_val_ft), _ft_train_mean)
+    print(f"  fumbles_lost_total_L5 missing -- using global mean fallback")
+_ft_preds_l5 = np.clip(_ft_preds_l5, 0, None)
+_ft_b3 = _metrics(Y_val_ft[FT_TARGET], _ft_preds_l5, "RollingL5")
+_ft_b3["target"] = FT_TARGET
+print(f"  {FT_TARGET:<25}  MAE={_ft_b3['MAE']:.3f}  RMSE={_ft_b3['RMSE']:.3f}  R2={_ft_b3['R2']:+.3f}  Bias={_ft_b3['Bias']:+.3f}")
+
+# %%
+# --- FT-4.4  Ridge baseline ---
+print("\n--- FT-B4: Ridge regression ---")
+
+_ft_col_medians  = X_train_ft_ridge.median().fillna(0)
+_Xtr_ft_r        = X_train_ft_ridge.fillna(_ft_col_medians).fillna(0)
+_Xva_ft_r        = X_val_ft_ridge.fillna(_ft_col_medians).fillna(0)
+
+_ft_scaler  = StandardScaler()
+_Xtr_ft_s   = _ft_scaler.fit_transform(_Xtr_ft_r)
+_Xva_ft_s   = _ft_scaler.transform(_Xva_ft_r)
+
+_ft_ridge = Ridge(alpha=10.0)
+_ft_ridge.fit(_Xtr_ft_s, Y_train_ft[FT_TARGET].values, sample_weight=sample_weights)
+_ft_preds_ridge = np.clip(_ft_ridge.predict(_Xva_ft_s), 0, None)
+
+_ft_b4 = _metrics(Y_val_ft[FT_TARGET], _ft_preds_ridge, "Ridge")
+_ft_b4["target"] = FT_TARGET
+print(f"  {FT_TARGET:<25}  MAE={_ft_b4['MAE']:.3f}  RMSE={_ft_b4['RMSE']:.3f}  R2={_ft_b4['R2']:+.3f}  Bias={_ft_b4['Bias']:+.3f}")
+
+_ft_coef_df = (
+    pd.DataFrame({"feature": FT_FEATURES_RIDGE, "coefficient": _ft_ridge.coef_})
+    .assign(abs_coef=lambda d: d["coefficient"].abs())
+    .sort_values("abs_coef", ascending=False)
+    .drop(columns="abs_coef")
+    .reset_index(drop=True)
+)
+_ft_coef_df.index = range(1, len(_ft_coef_df) + 1)
+print(f"\n  Ridge coefficients -- {FT_TARGET} (standardized, sorted by |coef|):")
+print(f"  {'Rank':<5} {'Feature':<55} {'Coefficient':>12}")
+print(f"  {'-'*75}")
+for rank, row in _ft_coef_df.iterrows():
+    print(f"  {rank:<5} {row['feature']:<55} {row['coefficient']:>+12.4f}")
+
+# %%
+# --- FT-4.5  Baseline summary ---
+df_ft_baselines = pd.DataFrame([_ft_b1, _ft_b2, _ft_b3, _ft_b4])
+
+print("\n" + "="*60)
+print(f"FT BASELINE SUMMARY -- VAL 2024")
+print("="*60)
+sub = df_ft_baselines[["baseline", "MAE", "RMSE", "R2", "Bias"]].set_index("baseline")
+print(sub.to_string(float_format=lambda x: f"{x:+.3f}" if abs(x) < 1000 else f"{x:.3f}"))
+
+# %%
+# =============================================================================
+# FT-PHASE 5  —  LightGBM: fumbles_lost_total (MSE, rolling forward CV + Optuna)
+# =============================================================================
+
+FT_OOF_FIRST_VAL_YEAR = 2017
+FT_OPTUNA_TUNE_YEAR   = 2023
+FT_N_TRIALS           = 60
+FT_CLIP               = True
+
+print("\n" + "="*60)
+print(f"FT-PHASE 5  --  LightGBM: {FT_TARGET}")
+print("="*60)
+print(f"  objective=regression(MSE)  rolling CV: val {FT_OOF_FIRST_VAL_YEAR}-{FT_OPTUNA_TUNE_YEAR}")
+
+# %%
+# --- FT-5.1  Optuna: tune on train 2006-2022, val 2023 ---
+
+_Xtr_opt_ft, _Ytr_opt_ft, _sw_opt_ft, _Xva_opt_ft, _Yva_opt_ft = _cv_split(
+    df_train, FT_OPTUNA_TUNE_YEAR, FT_FEATURES_LGB, [FT_TARGET]
+)
+
+_y_tr_opt_ft     = np.clip(_Ytr_opt_ft[FT_TARGET].values.astype(float), 0, None)
+_y_va_opt_ft_raw = np.clip(_Yva_opt_ft[FT_TARGET].values.astype(float), 0, None)
+_dtrain_opt_ft = lgb.Dataset(_Xtr_opt_ft, label=_y_tr_opt_ft, weight=_sw_opt_ft, free_raw_data=False)
+_dval_opt_ft   = lgb.Dataset(_Xva_opt_ft, label=_y_va_opt_ft_raw, reference=_dtrain_opt_ft, free_raw_data=False)
+
+def _make_ft_objective(dtrain, dval, X_va, Y_va_raw):
+    def objective_fn(trial):
+        params = {
+            "verbosity":         -1,
+            "objective":         "regression",
+            "metric":            "mse",
+            "num_leaves":        trial.suggest_int("num_leaves", 31, 512),
+            "max_depth":         trial.suggest_int("max_depth", 4, 12),
+            "learning_rate":     trial.suggest_float("learning_rate", 0.005, 0.15, log=True),
+            "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
+            "subsample":         trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree":  trial.suggest_float("colsample_bytree", 0.4, 1.0),
+            "reg_alpha":         trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
+            "reg_lambda":        trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+            "min_split_gain":    trial.suggest_float("min_split_gain", 0.0, 1.0),
+            "extra_trees":       trial.suggest_categorical("extra_trees", [True, False]),
+            "n_jobs": -1, "seed": 42,
+        }
+        _b = lgb.train(
+            params, dtrain,
+            num_boost_round=2000,
+            valid_sets=[dval],
+            callbacks=[early_stopping(50, verbose=False), log_evaluation(-1)],
+        )
+        _preds = np.clip(_b.predict(X_va), 0, None)
+        return float(np.sqrt(np.mean((_preds - Y_va_raw) ** 2)))
+    return objective_fn
+
+_ft_progress = _OptunaProgress(FT_N_TRIALS, FT_TARGET)
+ft_study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=42))
+ft_study.optimize(
+    _make_ft_objective(_dtrain_opt_ft, _dval_opt_ft, _Xva_opt_ft, _y_va_opt_ft_raw),
+    n_trials=FT_N_TRIALS,
+    show_progress_bar=False,
+    callbacks=[_ft_progress],
+)
+_ft_progress.close()
+
+ft_best_params = ft_study.best_params
+print(f"\n  Optuna best RMSE: {ft_study.best_value:.4f}  (trial {ft_study.best_trial.number}/{FT_N_TRIALS})")
+print(f"  Best params: {ft_best_params}")
+
+# %%
+# --- FT-5.2  Rolling forward CV with best_params ---
+
+ft_final_params = {
+    "verbosity": -1,
+    "objective": "regression",
+    "metric": "mse",
+    "n_jobs": -1, "seed": 42,
+    **{k: v for k, v in ft_best_params.items() if k != "extra_trees"},
+    "extra_trees": ft_best_params["extra_trees"],
+}
+
+ft_cv_val_years = list(range(FT_OOF_FIRST_VAL_YEAR, TRAIN_END + 1))
+print(f"\n  Rolling forward CV: {len(ft_cv_val_years)} folds  ({ft_cv_val_years[0]}-{ft_cv_val_years[-1]})")
+
+ft_oof_actual = []; ft_oof_pred = []; ft_oof_years = []; ft_best_iters = []
+for _yr in ft_cv_val_years:
+    _Xtr, _Ytr, _sw, _Xva, _Yva = _cv_split(df_train, _yr, FT_FEATURES_LGB, [FT_TARGET])
+    _y_tr_raw = np.clip(_Ytr[FT_TARGET].values.astype(float), 0, None)
+    _y_va_raw = np.clip(_Yva[FT_TARGET].values.astype(float), 0, None)
+    _dt = lgb.Dataset(_Xtr, label=_y_tr_raw, weight=_sw, free_raw_data=False)
+    _dv = lgb.Dataset(_Xva, label=_y_va_raw, reference=_dt, free_raw_data=False)
+    _b = lgb.train(
+        ft_final_params, _dt,
+        num_boost_round=2000,
+        valid_sets=[_dv],
+        callbacks=[early_stopping(100, verbose=False), log_evaluation(-1)],
+    )
+    _p = np.clip(_b.predict(_Xva), 0, None)
+    ft_oof_actual.extend(_y_va_raw.tolist())
+    ft_oof_pred.extend(_p.tolist())
+    ft_oof_years.extend([_yr] * len(_Yva))
+    ft_best_iters.append(_b.best_iteration)
+    print(f"    fold val={_yr}  n_train={len(_Xtr):,}  n_val={len(_Xva):,}  "
+          f"best_iter={_b.best_iteration}  "
+          f"RMSE={np.sqrt(mean_squared_error(_y_va_raw, _p)):.3f}")
+
+ft_oof_actual     = np.array(ft_oof_actual)
+ft_oof_pred       = np.array(ft_oof_pred)
+ft_oof_years      = np.array(ft_oof_years)
+ft_mean_best_iter = int(np.mean(ft_best_iters))
+print(f"\n  Mean best_iteration across folds: {ft_mean_best_iter}")
+
+# %%
+# --- FT-5.3  OOF metrics: per-year + overall ---
+
+print("\n" + "="*60)
+print(f"FT OOF METRICS (rolling forward CV)  --  {FT_TARGET}")
+print("="*60)
+print(f"  {'Year':<6}  {'N':>5}  {'MAE':>8}  {'RMSE':>8}  {'R2':>8}  {'Bias':>8}")
+print(f"  {'-'*52}")
+
+for _yr in ft_cv_val_years:
+    _mask = ft_oof_years == _yr
+    _m    = _metrics(ft_oof_actual[_mask], ft_oof_pred[_mask], "OOF")
+    print(f"  {_yr:<6}  {_mask.sum():>5}  "
+          f"{_m['MAE']:>8.3f}  {_m['RMSE']:>8.3f}  {_m['R2']:>+8.3f}  {_m['Bias']:>+8.3f}")
+
+_ft_m_overall = _metrics(ft_oof_actual, ft_oof_pred, "OOF-Overall")
+print(f"  {'-'*52}")
+print(f"  {'TOTAL':<6}  {len(ft_oof_actual):>5}  "
+      f"{_ft_m_overall['MAE']:>8.3f}  {_ft_m_overall['RMSE']:>8.3f}  "
+      f"{_ft_m_overall['R2']:>+8.3f}  {_ft_m_overall['Bias']:>+8.3f}")
+
+# %%
+# --- FT-5.4  Final model: train 2006-2023, n_trees = mean best_iter ---
+
+print(f"\n  Final FT model: train 2006-{TRAIN_END}, n_trees={ft_mean_best_iter}")
+
+_y_tr_ft_full  = np.clip(Y_train_ft[FT_TARGET].values.astype(float), 0, None)
+_dtrain_ft_final = lgb.Dataset(X_train_ft, label=_y_tr_ft_full, weight=sample_weights, free_raw_data=False)
+
+ft_booster_final = lgb.train(
+    {**ft_final_params, "metric": "none"},
+    _dtrain_ft_final,
+    num_boost_round=ft_mean_best_iter,
+    callbacks=[log_evaluation(-1)],
+)
+
+_ft_preds_val = np.clip(ft_booster_final.predict(X_val_ft), 0, None)
+_ft_m_val = _metrics(Y_val_ft[FT_TARGET], _ft_preds_val, "LightGBM")
+print(f"  Val 2024 -> MAE={_ft_m_val['MAE']:.3f}  RMSE={_ft_m_val['RMSE']:.3f}  "
+      f"R2={_ft_m_val['R2']:+.3f}  Bias={_ft_m_val['Bias']:+.3f}")
+
+# %%
+# --- FT-5.5  Summary vs baselines ---
+print("\n" + "="*60)
+print(f"FT-PHASE 5 SUMMARY -- {FT_TARGET}")
+print("="*60)
+print(f"  {'Metric':<10}  {'LGB OOF':>10}  {'LGB Val24':>10}  {'Ridge Val24':>12}")
+for metric in ["MAE", "RMSE", "R2"]:
+    print(f"  {metric:<10}  {float(_ft_m_overall[metric]):>10.3f}  "
+          f"{_ft_m_val[metric]:>10.3f}  {_ft_b4[metric]:>12.3f}")
+
+print(f"\nFT-Phase 5 complete.")
+
+# %%
+# =============================================================================
+# FT-PHASE 6  —  EVALUATION & DIAGNOSTICS: fumbles_lost_total
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"FT-PHASE 6  --  EVALUATION: {FT_TARGET}")
+print("="*60)
+
+_ft_preds_test = np.clip(ft_booster_final.predict(X_test_ft), 0, None)
+
+# %%
+# --- FT-6.1  Full metrics table ---
+
+print(f"\n  [{FT_TARGET}]")
+for split, yt, yp in [("Val 2024",  Y_val_ft[FT_TARGET].values,  _ft_preds_val),
+                      ("Test 2025", Y_test_ft[FT_TARGET].values, _ft_preds_test)]:
+    fm = _full_metrics(yt, yp)
+    print(f"\n  [{split}]")
+    for k, v in fm.items():
+        print(f"    {k:<15}  {v:>10.4f}")
+
+# %%
+# --- FT-6.2  Predicted vs actual scatter ---
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",  Y_val_ft[FT_TARGET].values,  _ft_preds_val),
+    ("Test 2025", Y_test_ft[FT_TARGET].values, _ft_preds_test),
+]):
+    lim = max(yt.max(), yp.max()) * 1.15 + 0.5
+    ax.scatter(yt, yp, alpha=0.25, s=12, color="steelblue", edgecolors="none")
+    ax.plot([0, lim], [0, lim], "r--", lw=1.5, label="Perfect")
+    m_c, b_c = np.polyfit(yt, yp, 1)
+    xs = np.linspace(0, lim, 100)
+    ax.plot(xs, m_c * xs + b_c, "k-", lw=1.2, alpha=0.7, label="OLS fit")
+    r2v   = r2_score(yt, yp)
+    pearr = np.corrcoef(yt, yp)[0, 1]
+    ax.set_title(f"Fumbles Lost -- {split}\nR2={r2v:.3f}  r={pearr:.3f}",
+                 fontsize=10, fontweight="bold")
+    ax.set_xlabel("Actual Fumbles Lost", fontsize=9)
+    ax.set_ylabel("Predicted Fumbles Lost", fontsize=9)
+    ax.legend(fontsize=8)
+    ax.tick_params(labelsize=8)
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{FT_TARGET}_pred_vs_actual.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- FT-6.3  Residual distribution ---
+
+from scipy.stats import gaussian_kde as _gkde_ft, norm as _sp_norm_ft
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",    Y_val_ft[FT_TARGET].values,  _ft_preds_val),
+    ("Test 2025",   Y_test_ft[FT_TARGET].values, _ft_preds_test),
+    ("OOF 2017-23", ft_oof_actual,               ft_oof_pred),
+]):
+    resid = yp - yt
+    ax.hist(resid, bins=40, density=True, color="steelblue", alpha=0.6, edgecolor="white")
+    kde_x = np.linspace(resid.min(), resid.max(), 300)
+    try:
+        ax.plot(kde_x, _gkde_ft(resid)(kde_x), "k-", lw=1.5, label="KDE")
+        ax.plot(kde_x, _sp_norm_ft.pdf(kde_x, resid.mean(), resid.std()), "r--", lw=1.2, alpha=0.8, label="Normal")
+    except Exception:
+        pass
+    ax.axvline(0, color="red", linestyle="--", lw=1.5)
+    ax.set_title(f"Residuals -- Fumbles Lost {split}\nbias={resid.mean():+.2f}  sd={resid.std():.2f}",
+                 fontsize=10, fontweight="bold")
+    ax.set_xlabel("Residual (pred - actual)", fontsize=9)
+    ax.set_ylabel("Density", fontsize=9)
+    ax.legend(fontsize=8)
+    ax.tick_params(labelsize=8)
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{FT_TARGET}_residuals.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- FT-6.4  Calibration curve ---
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",  Y_val_ft[FT_TARGET].values,  _ft_preds_val),
+    ("Test 2025", Y_test_ft[FT_TARGET].values, _ft_preds_test),
+]):
+    _cal_df = pd.DataFrame({"actual": yt, "pred": yp})
+    try:
+        _cal_df["decile"] = pd.qcut(_cal_df["pred"], q=10, labels=False, duplicates="drop")
+        _cal_grp = _cal_df.groupby("decile").agg(mean_pred=("pred", "mean"), mean_actual=("actual", "mean"))
+        lim = max(_cal_grp["mean_pred"].max(), _cal_grp["mean_actual"].max()) * 1.2
+        ax.plot(_cal_grp["mean_pred"], _cal_grp["mean_actual"], "o-", color="steelblue", lw=1.5)
+        for _, r in _cal_grp.iterrows():
+            ax.annotate(f"{r.name}", (r["mean_pred"], r["mean_actual"]), fontsize=7,
+                        textcoords="offset points", xytext=(4, 2))
+        ax.plot([0, lim], [0, lim], "r--", lw=1.5, label="Perfect calibration")
+        ax.set_title(f"Fumbles Lost Calibration -- {split}", fontsize=10, fontweight="bold")
+        ax.set_xlabel("Mean Predicted (decile)", fontsize=9)
+        ax.set_ylabel("Mean Actual", fontsize=9)
+        ax.legend(fontsize=8)
+    except Exception as e:
+        ax.set_title(f"Calibration skipped: {e}")
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase6_{FT_TARGET}_calibration.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- FT-6.5  MAE by week (test 2025) ---
+
+try:
+    _ft_week_df = pd.DataFrame({
+        "week":   df_test["week"].values,
+        "actual": Y_test_ft[FT_TARGET].values,
+        "pred":   _ft_preds_test,
+    })
+    _ft_wk = (_ft_week_df.groupby("week")
+              .apply(lambda g: mean_absolute_error(g["actual"], g["pred"]))
+              .reset_index(name="MAE"))
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(_ft_wk["week"], _ft_wk["MAE"], color="steelblue", edgecolor="white")
+    ax.set_title(f"MAE by Week -- Fumbles Lost (Test 2025)", fontsize=11, fontweight="bold")
+    ax.set_xlabel("NFL Week", fontsize=9)
+    ax.set_ylabel("MAE", fontsize=9)
+    ax.tick_params(labelsize=8)
+    plt.tight_layout()
+    _fig_path = FIG_DIR / f"phase6_{FT_TARGET}_mae_by_week.png"
+    plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+    plt.close()
+    _show(_fig_path)
+    print(f"  Saved: {_fig_path.name}")
+except Exception as e:
+    print(f"  MAE-by-week skipped: {e}")
+
+# %%
+# --- FT-6.6  Export test predictions ---
+
+_ft_export_df = df_test[["player_display_name", "week", "attempts", "depth_chart_rank"]].copy().reset_index(drop=True)
+_ft_export_df["actual_fumbles_lost"]    = Y_test_ft[FT_TARGET].values
+_ft_export_df["predicted_fumbles_lost"] = _ft_preds_test
+_ft_export_df["residual"]               = _ft_export_df["predicted_fumbles_lost"] - _ft_export_df["actual_fumbles_lost"]
+_ft_export_df = _ft_export_df.sort_values(["week", "actual_fumbles_lost"], ascending=[True, False]).reset_index(drop=True)
+
+_ft_export_path = DATA_DIR / f"test_predictions_2025_{FT_TARGET}.xlsx"
+_ft_export_df.to_excel(_ft_export_path, index=False)
+print(f"\n  2025 test predictions saved: {_ft_export_path.name}  ({len(_ft_export_df)} rows)")
+print(f"\nFT-Phase 6 complete.")
+
+# %%
+# =============================================================================
+# FT-PHASE 7  —  FEATURE IMPORTANCE & SHAP: fumbles_lost_total
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"FT-PHASE 7  --  FEATURE IMPORTANCE: {FT_TARGET}")
+print("="*60)
+
+# %%
+# --- FT-7.1  LightGBM native gain importance ---
+
+_ft_imp_gain = (
+    pd.Series(ft_booster_final.feature_importance(importance_type="gain"),
+              index=FT_FEATURES_LGB)
+    .sort_values(ascending=False)
+)
+
+fig, ax = plt.subplots(figsize=(10, 8))
+_ft_imp_gain.head(25).plot.barh(ax=ax, color="steelblue", edgecolor="white")
+ax.invert_yaxis()
+ax.set_title(f"LightGBM Gain Importance (top 25) -- {FT_TARGET}", fontsize=11, fontweight="bold")
+ax.set_xlabel("Total Gain", fontsize=9)
+ax.tick_params(labelsize=8)
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{FT_TARGET}_gain_importance.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- FT-7.2  SHAP ---
+
+_ft_sample_idx = np.random.default_rng(42).choice(len(X_test_ft), size=min(500, len(X_test_ft)), replace=False)
+_ft_X_shap     = X_test_ft.iloc[_ft_sample_idx].reset_index(drop=True)
+
+_ft_explainer   = _shap_lib.TreeExplainer(ft_booster_final)
+_ft_shap_values = _ft_explainer.shap_values(_ft_X_shap)
+
+_ft_mean_abs_shap = pd.Series(
+    np.abs(_ft_shap_values).mean(axis=0),
+    index=FT_FEATURES_LGB,
+).sort_values(ascending=False)
+
+fig, ax = plt.subplots(figsize=(10, 9))
+_shap_lib.summary_plot(_ft_shap_values, _ft_X_shap, max_display=20, show=False)
+plt.title(f"SHAP Beeswarm -- {FT_TARGET} (top 20)", fontsize=11, fontweight="bold")
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{FT_TARGET}_shap_beeswarm.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+fig, ax = plt.subplots(figsize=(10, 8))
+_ft_mean_abs_shap.head(20).plot.barh(ax=ax, color="darkorange", edgecolor="white")
+ax.invert_yaxis()
+ax.set_title(f"Mean |SHAP| (top 20) -- {FT_TARGET}", fontsize=11, fontweight="bold")
+ax.set_xlabel("Mean |SHAP value|", fontsize=9)
+ax.tick_params(labelsize=8)
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7_{FT_TARGET}_shap_bar.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- FT-7.3  Full importance table ---
+
+_ft_gain_df = _ft_imp_gain.reset_index(); _ft_gain_df.columns = ["feature", "gain"]
+_ft_shap_df = _ft_mean_abs_shap.reset_index(); _ft_shap_df.columns = ["feature", "mean_abs_shap"]
+_ft_gain_df["gain_rank"] = range(1, len(_ft_gain_df) + 1)
+_ft_shap_df["shap_rank"] = range(1, len(_ft_shap_df) + 1)
+
+_ft_full_imp = _ft_gain_df.merge(_ft_shap_df, on="feature")[
+    ["gain_rank", "shap_rank", "feature", "gain", "mean_abs_shap"]
+].sort_values("shap_rank").reset_index(drop=True)
+
+print(f"\n  {'gain_rank':>10}  {'shap_rank':>10}  {'feature':<55}  {'gain':>14}  {'mean_abs_shap':>14}")
+print(f"  {'-'*105}")
+for _, r in _ft_full_imp.iterrows():
+    print(f"  {int(r['gain_rank']):>10}  {int(r['shap_rank']):>10}  {r['feature']:<55}  "
+          f"{r['gain']:>14.2f}  {r['mean_abs_shap']:>14.6f}")
+
+_ft_imp_path = DATA_DIR / f"feature_importance_{FT_TARGET}.xlsx"
+_ft_full_imp.to_excel(_ft_imp_path, index=False)
+print(f"\n  Full importance saved: {_ft_imp_path.name}")
+print(f"\nFT-Phase 7 complete.")
+
+# %%
+# =============================================================================
+# FT-PHASE 7B  —  SEASON-LEVEL DIAGNOSTICS: fumbles_lost_total (Test 2025)
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"FT-PHASE 7B  --  SEASON-LEVEL DIAGNOSTICS: {FT_TARGET}")
+print("="*60)
+
+_ft_szn = (
+    _ft_export_df.groupby("player_display_name")
+    .agg(
+        games               =("actual_fumbles_lost",    "count"),
+        actual_total        =("actual_fumbles_lost",    "sum"),
+        predicted_total     =("predicted_fumbles_lost", "sum"),
+        depth_chart_rank_min=("depth_chart_rank",       "min"),
+    )
+    .reset_index()
+    .sort_values("actual_total", ascending=False)
+)
+_ft_szn["residual"]  = _ft_szn["predicted_total"] - _ft_szn["actual_total"]
+_ft_szn["pct_error"] = np.where(
+    _ft_szn["actual_total"] == 0, np.nan,
+    (_ft_szn["predicted_total"] - _ft_szn["actual_total"]) / _ft_szn["actual_total"]
+)
+
+_yt_ft_s = _ft_szn["actual_total"].values.astype(float)
+_yp_ft_s = _ft_szn["predicted_total"].values.astype(float)
+_ft_mae_s  = mean_absolute_error(_yt_ft_s, _yp_ft_s)
+_ft_rmse_s = float(np.sqrt(np.mean((_yp_ft_s - _yt_ft_s) ** 2)))
+_ft_r2_s   = float(r2_score(_yt_ft_s, _yp_ft_s))
+_ft_bias_s = float(np.mean(_yp_ft_s - _yt_ft_s))
+_ft_mape_s = float(np.mean(np.abs(_ft_szn["pct_error"].dropna())))
+_ft_r_s    = float(np.corrcoef(_yt_ft_s, _yp_ft_s)[0, 1])
+_ft_w10_s  = float((_ft_szn["pct_error"].abs().dropna() <= 0.10).mean() * 100)
+_ft_w20_s  = float((_ft_szn["pct_error"].abs().dropna() <= 0.20).mean() * 100)
+
+print(f"\n  Season-level fit diagnostics ({len(_ft_szn)} QBs):")
+print(f"  {'MAE (Fumbles)':<20}  {_ft_mae_s:>10.2f}")
+print(f"  {'RMSE (Fumbles)':<20}  {_ft_rmse_s:>10.2f}")
+print(f"  {'R2':<20}  {_ft_r2_s:>10.4f}")
+print(f"  {'Bias (pred-act)':<20}  {_ft_bias_s:>10.2f}")
+print(f"  {'MAPE':<20}  {_ft_mape_s:>10.2%}")
+print(f"  {'Pearson r':<20}  {_ft_r_s:>10.4f}")
+print(f"  {'Within 10%':<20}  {_ft_w10_s:>10.1f}%")
+print(f"  {'Within 20%':<20}  {_ft_w20_s:>10.1f}%")
+
+print(f"\n  {'QB':<25}  {'G':>3}  {'Actual':>8}  {'Pred':>8}  {'Resid':>8}  {'Pct Err':>8}  {'DC Rank':>7}")
+print(f"  {'-'*75}")
+for _, row in _ft_szn.iterrows():
+    pct_str = f"{row.pct_error*100:+7.1f}%" if pd.notna(row.pct_error) else "     N/A"
+    print(f"  {row.player_display_name:<25}  {int(row.games):>3}  {row.actual_total:>8.0f}  "
+          f"{row.predicted_total:>8.1f}  {row.residual:>+8.1f}  {pct_str}  {int(row.depth_chart_rank_min):>7}")
+
+_ft_szn_path = DATA_DIR / f"test_predictions_2025_{FT_TARGET}_season_totals.xlsx"
+_ft_szn.to_excel(_ft_szn_path, index=False)
+print(f"\n  Season totals saved: {_ft_szn_path.name}")
+print(f"\nFT-Phase 7B complete.")
+
+# %%
+# =============================================================================
+# FT-PHASE 7C  —  RIDGE FULL DIAGNOSTICS: fumbles_lost_total (Val 2024 + Test 2025)
+# =============================================================================
+
+print("\n" + "="*60)
+print(f"FT-PHASE 7C  --  RIDGE FULL DIAGNOSTICS: {FT_TARGET}")
+print("="*60)
+
+_Xte_ft_r        = X_test_ft_ridge.fillna(_ft_col_medians).fillna(0)
+_Xte_ft_s        = _ft_scaler.transform(_Xte_ft_r)
+_ft_preds_ridge_test = np.clip(_ft_ridge.predict(_Xte_ft_s), 0, None)
+
+print(f"\n  [Ridge -- {FT_TARGET}]")
+for split, yt, yp in [("Val 2024",  Y_val_ft[FT_TARGET].values,  _ft_preds_ridge),
+                      ("Test 2025", Y_test_ft[FT_TARGET].values, _ft_preds_ridge_test)]:
+    fm = _full_metrics(yt, yp)
+    print(f"\n  [{split}]")
+    for k, v in fm.items():
+        print(f"    {k:<15}  {v:>10.4f}")
+
+# %%
+# --- FT-7C.1  Calibration: Ridge ---
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, (split, yt, yp) in zip(axes, [
+    ("Val 2024",  Y_val_ft[FT_TARGET].values,  _ft_preds_ridge),
+    ("Test 2025", Y_test_ft[FT_TARGET].values, _ft_preds_ridge_test),
+]):
+    _cal_df = pd.DataFrame({"actual": yt, "pred": yp})
+    try:
+        _cal_df["decile"] = pd.qcut(_cal_df["pred"], q=10, labels=False, duplicates="drop")
+        _cal_grp = _cal_df.groupby("decile").agg(mean_pred=("pred", "mean"), mean_actual=("actual", "mean"))
+        lim = max(_cal_grp["mean_pred"].max(), _cal_grp["mean_actual"].max()) * 1.2
+        ax.plot(_cal_grp["mean_pred"], _cal_grp["mean_actual"], "o-", color="tomato", lw=1.5)
+        ax.plot([0, lim], [0, lim], "r--", lw=1.5, label="Perfect calibration")
+        ax.set_title(f"Ridge Fumbles Lost Calibration -- {split}", fontsize=10, fontweight="bold")
+        ax.set_xlabel("Mean Predicted (decile)", fontsize=9)
+        ax.set_ylabel("Mean Actual", fontsize=9)
+        ax.legend(fontsize=8)
+    except Exception as e:
+        ax.set_title(f"Calibration skipped: {e}")
+
+plt.tight_layout()
+_fig_path = FIG_DIR / f"phase7c_{FT_TARGET}_ridge_calibration.png"
+plt.savefig(_fig_path, dpi=130, bbox_inches="tight")
+plt.close()
+_show(_fig_path)
+print(f"  Saved: {_fig_path.name}")
+
+# %%
+# --- FT-7C.2  LGB vs Ridge comparison ---
+
+_ft_lgb_val  = _full_metrics(Y_val_ft[FT_TARGET].values,  _ft_preds_val)
+_ft_lgb_test = _full_metrics(Y_test_ft[FT_TARGET].values, _ft_preds_test)
+_ft_rdg_val  = _full_metrics(Y_val_ft[FT_TARGET].values,  _ft_preds_ridge)
+_ft_rdg_test = _full_metrics(Y_test_ft[FT_TARGET].values, _ft_preds_ridge_test)
+
+print(f"\n{'='*60}")
+print(f"LGB vs Ridge Comparison -- {FT_TARGET}")
+print(f"{'='*60}")
+print(f"  {'Metric':<12}  {'LGB Val24':>10}  {'Rdg Val24':>10}  {'LGB Tst25':>10}  {'Rdg Tst25':>10}")
+for metric in ["MAE", "RMSE", "R2", "Pearson_r"]:
+    print(f"  {metric:<12}  {_ft_lgb_val[metric]:>10.3f}  {_ft_rdg_val[metric]:>10.3f}  "
+          f"  {_ft_lgb_test[metric]:>10.3f}  {_ft_rdg_test[metric]:>10.3f}")
+
+# %%
+# --- FT-7C.3  Ridge season-level diagnostics (Test 2025) ---
+
+_ft_ridge_szn_df = df_test[["player_display_name", "week", "depth_chart_rank"]].copy().reset_index(drop=True)
+_ft_ridge_szn_df["actual_fumbles_lost"]    = Y_test_ft[FT_TARGET].values
+_ft_ridge_szn_df["predicted_fumbles_lost"] = _ft_preds_ridge_test
+
+_ft_ridge_szn = (
+    _ft_ridge_szn_df.groupby("player_display_name")
+    .agg(
+        games               =("actual_fumbles_lost",    "count"),
+        actual_total        =("actual_fumbles_lost",    "sum"),
+        predicted_total     =("predicted_fumbles_lost", "sum"),
+        depth_chart_rank_min=("depth_chart_rank",       "min"),
+    )
+    .reset_index()
+    .sort_values("actual_total", ascending=False)
+)
+_ft_ridge_szn["residual"]  = _ft_ridge_szn["predicted_total"] - _ft_ridge_szn["actual_total"]
+_ft_ridge_szn["pct_error"] = np.where(
+    _ft_ridge_szn["actual_total"] == 0, np.nan,
+    (_ft_ridge_szn["predicted_total"] - _ft_ridge_szn["actual_total"]) / _ft_ridge_szn["actual_total"]
+)
+
+_yt_rdg_ft = _ft_ridge_szn["actual_total"].values.astype(float)
+_yp_rdg_ft = _ft_ridge_szn["predicted_total"].values.astype(float)
+_rdg_ft_mae_s  = mean_absolute_error(_yt_rdg_ft, _yp_rdg_ft)
+_rdg_ft_rmse_s = float(np.sqrt(np.mean((_yp_rdg_ft - _yt_rdg_ft) ** 2)))
+_rdg_ft_r2_s   = float(r2_score(_yt_rdg_ft, _yp_rdg_ft))
+_rdg_ft_bias_s = float(np.mean(_yp_rdg_ft - _yt_rdg_ft))
+_rdg_ft_mape_s = float(np.mean(np.abs(_ft_ridge_szn["pct_error"].dropna())))
+_rdg_ft_r_s    = float(np.corrcoef(_yt_rdg_ft, _yp_rdg_ft)[0, 1])
+_rdg_ft_w10_s  = float((_ft_ridge_szn["pct_error"].abs().dropna() <= 0.10).mean() * 100)
+_rdg_ft_w20_s  = float((_ft_ridge_szn["pct_error"].abs().dropna() <= 0.20).mean() * 100)
+
+print(f"\n  [Ridge] Season-level diagnostics ({len(_ft_ridge_szn)} QBs) -- Test 2025:")
+print(f"  {'MAE (Fumbles)':<20}  {_rdg_ft_mae_s:>10.2f}")
+print(f"  {'RMSE (Fumbles)':<20}  {_rdg_ft_rmse_s:>10.2f}")
+print(f"  {'R2':<20}  {_rdg_ft_r2_s:>10.4f}")
+print(f"  {'Bias (pred-act)':<20}  {_rdg_ft_bias_s:>10.2f}")
+print(f"  {'MAPE':<20}  {_rdg_ft_mape_s:>10.2%}")
+print(f"  {'Pearson r':<20}  {_rdg_ft_r_s:>10.4f}")
+print(f"  {'Within 10%':<20}  {_rdg_ft_w10_s:>10.1f}%")
+print(f"  {'Within 20%':<20}  {_rdg_ft_w20_s:>10.1f}%")
+
+print(f"\n  {'QB':<25}  {'G':>3}  {'Actual':>8}  {'Pred':>8}  {'Resid':>8}  {'Pct Err':>8}  {'DC Rank':>7}")
+print(f"  {'-'*75}")
+for _, row in _ft_ridge_szn.iterrows():
+    pct_str = f"{row.pct_error*100:+7.1f}%" if pd.notna(row.pct_error) else "     N/A"
+    print(f"  {row.player_display_name:<25}  {int(row.games):>3}  {row.actual_total:>8.0f}  "
+          f"{row.predicted_total:>8.1f}  {row.residual:>+8.1f}  {pct_str}  {int(row.depth_chart_rank_min):>7}")
+
+print(f"\nFT-Phase 7C complete.")
+
+# %%
+# =============================================================================
+# COMBINED FANTASY ANALYSIS  —  All2025 / AllVal2024 / AllOOF / AllCombined
+# =============================================================================
+
+# %%
+# --- Shared helpers ---
+
+_STAT_COLS = [
+    ("passing_yards",  "Pass Yds"),
+    ("passing_tds",    "Pass TDs"),
+    ("rushing_yards",  "Rush Yds"),
+    ("rushing_tds",    "Rush TDs"),
+    ("interceptions",  "INTs"),
+    ("fumbles_lost",   "Fumbles"),
+]
+
+def _add_fantasy(df):
+    df = df.copy()
+    df["PredictedFantasy"] = (
+          0.04 * df["predicted_passing_yards"]
+        + 4.0  * df["predicted_passing_tds"]
+        + 0.1  * df["predicted_rushing_yards"]
+        + 6.0  * df["predicted_rushing_tds"]
+        - 2.0  * (df["predicted_interceptions"] + df["predicted_fumbles_lost"])
+    )
+    df["ActualFantasy"] = (
+          0.04 * df["actual_passing_yards"]
+        + 4.0  * df["actual_passing_tds"]
+        + 0.1  * df["actual_rushing_yards"]
+        + 6.0  * df["actual_rushing_tds"]
+        - 2.0  * (df["actual_interceptions"] + df["actual_fumbles_lost"])
+    )
+    df["residual"] = df["PredictedFantasy"] - df["ActualFantasy"]
+    return df
+
+def _season_totals(df):
+    szn = (
+        df.groupby("player_display_name")
+        .agg(
+            games                   =("week",                    "count"),
+            actual_passing_yards    =("actual_passing_yards",    "sum"),
+            predicted_passing_yards =("predicted_passing_yards", "sum"),
+            actual_passing_tds      =("actual_passing_tds",      "sum"),
+            predicted_passing_tds   =("predicted_passing_tds",   "sum"),
+            actual_rushing_yards    =("actual_rushing_yards",    "sum"),
+            predicted_rushing_yards =("predicted_rushing_yards", "sum"),
+            actual_rushing_tds      =("actual_rushing_tds",      "sum"),
+            predicted_rushing_tds   =("predicted_rushing_tds",   "sum"),
+            actual_interceptions    =("actual_interceptions",    "sum"),
+            predicted_interceptions =("predicted_interceptions", "sum"),
+            actual_fumbles_lost     =("actual_fumbles_lost",     "sum"),
+            predicted_fumbles_lost  =("predicted_fumbles_lost",  "sum"),
+        )
+        .reset_index()
+    )
+    return _add_fantasy(szn).sort_values("ActualFantasy", ascending=False).reset_index(drop=True)
+
+def _print_analysis(label, df, min_games=1):
+    print(f"\n{'='*65}")
+    print(f"{label}")
+    print(f"{'='*65}")
+
+    yt = df["ActualFantasy"].values
+    yp = df["PredictedFantasy"].values
+
+    print(f"\n  [Game-level -- {len(df):,} observations]")
+    print(f"  {'MAE (pts)':<22}  {mean_absolute_error(yt, yp):>10.3f}")
+    print(f"  {'RMSE (pts)':<22}  {float(np.sqrt(np.mean((yp-yt)**2))):>10.3f}")
+    print(f"  {'StdDev residual':<22}  {float(np.std(yp-yt)):>10.3f}")
+    print(f"  {'R2':<22}  {float(r2_score(yt, yp)):>10.4f}")
+    print(f"  {'Bias (pred-act)':<22}  {float(np.mean(yp-yt)):>10.3f}")
+    print(f"  {'Pearson r':<22}  {float(np.corrcoef(yt, yp)[0,1]):>10.4f}")
+
+    print(f"\n  Per-category bias / RMSE (game-level):")
+    print(f"  {'Stat':<14}  {'MeanAct':>9}  {'MeanPred':>9}  {'Bias':>9}  {'RMSE':>9}  {'R2':>8}")
+    print(f"  {'-'*65}")
+    for col, name in _STAT_COLS:
+        a = df[f"actual_{col}"].values.astype(float)
+        p = df[f"predicted_{col}"].values.astype(float)
+        print(f"  {name:<14}  {a.mean():>9.3f}  {p.mean():>9.3f}  "
+              f"{np.mean(p-a):>+9.3f}  {np.sqrt(np.mean((p-a)**2)):>9.3f}  "
+              f"{r2_score(a, p):>+8.4f}")
+
+    szn = _season_totals(df)
+    szn_full = szn[szn["games"] >= min_games]
+    yt_s = szn_full["ActualFantasy"].values
+    yp_s = szn_full["PredictedFantasy"].values
+
+    print(f"\n  [Season-level -- {len(szn_full)} QBs (>={min_games}g)]")
+    print(f"  {'MAE (pts)':<22}  {mean_absolute_error(yt_s, yp_s):>10.3f}")
+    print(f"  {'RMSE (pts)':<22}  {float(np.sqrt(np.mean((yp_s-yt_s)**2))):>10.3f}")
+    print(f"  {'R2':<22}  {float(r2_score(yt_s, yp_s)):>10.4f}")
+    print(f"  {'Bias (pred-act)':<22}  {float(np.mean(yp_s-yt_s)):>10.3f}")
+    print(f"  {'Pearson r':<22}  {float(np.corrcoef(yt_s, yp_s)[0,1]):>10.4f}")
+
+    print(f"\n  [Season starters >=12g -- {len(szn[szn['games']>=12])} QBs]")
+    szn12 = szn[szn["games"] >= 12]
+    if len(szn12) >= 3:
+        yt12 = szn12["ActualFantasy"].values
+        yp12 = szn12["PredictedFantasy"].values
+        print(f"  {'MAE (pts)':<22}  {mean_absolute_error(yt12, yp12):>10.3f}")
+        print(f"  {'RMSE (pts)':<22}  {float(np.sqrt(np.mean((yp12-yt12)**2))):>10.3f}")
+        print(f"  {'R2':<22}  {float(r2_score(yt12, yp12)):>10.4f}")
+        print(f"  {'Bias (pred-act)':<22}  {float(np.mean(yp12-yt12)):>10.3f}")
+        print(f"  {'Pearson r':<22}  {float(np.corrcoef(yt12, yp12)[0,1]):>10.4f}")
+
+    print(f"\n  {'QB':<25}  {'G':>3}  {'ActFP':>8}  {'PredFP':>8}  {'Resid':>8}")
+    print(f"  {'-'*60}")
+    for _, row in szn_full.sort_values("ActualFantasy", ascending=False).iterrows():
+        print(f"  {row.player_display_name:<25}  {int(row.games):>3}  "
+              f"{row.ActualFantasy:>8.1f}  {row.PredictedFantasy:>8.1f}  "
+              f"{row.residual:>+8.1f}")
+
+    return szn
+
+# %%
+# --- BUILD TEST 2025 combo ---
+
+_all25 = (
+    _export_df[["player_display_name", "week", "attempts",
+                "actual_passing_yards", "predicted_passing_yards"]]
+    .merge(_td_export_df[["player_display_name", "week",
+                          "actual_passing_tds", "predicted_passing_tds"]],
+           on=["player_display_name", "week"], how="inner")
+    .merge(_ry_export_df[["player_display_name", "week",
+                          "actual_rushing_yards", "predicted_rushing_yards"]],
+           on=["player_display_name", "week"], how="inner")
+    .merge(_rt_export_df[["player_display_name", "week",
+                          "actual_rushing_tds", "predicted_rushing_tds"]],
+           on=["player_display_name", "week"], how="inner")
+    .merge(_it_export_df[["player_display_name", "week",
+                          "actual_interceptions", "predicted_interceptions"]],
+           on=["player_display_name", "week"], how="inner")
+    .merge(_ft_export_df[["player_display_name", "week",
+                          "actual_fumbles_lost", "predicted_fumbles_lost"]],
+           on=["player_display_name", "week"], how="inner")
+    .sort_values(["player_display_name", "week"])
+    .reset_index(drop=True)
+)
+_all25 = _add_fantasy(_all25)
+_all25["split"] = "Test2025"
+
+# %%
+# --- BUILD VAL 2024 combo ---
+
+_val_info = df_val[["player_display_name", "week", "attempts"]].reset_index(drop=True)
+
+_all_val = _val_info.copy()
+_all_val["actual_passing_yards"]    = Y_val[ACTIVE_TARGET].values
+_all_val["predicted_passing_yards"] = preds_val_p6
+_all_val["actual_passing_tds"]      = Y_val_td[TD_TARGET].values
+_all_val["predicted_passing_tds"]   = _td_preds_val
+_all_val["actual_rushing_yards"]    = Y_val_ry[RY_TARGET].values
+_all_val["predicted_rushing_yards"] = _ry_preds_val
+_all_val["actual_rushing_tds"]      = Y_val_rt[RT_TARGET].values
+_all_val["predicted_rushing_tds"]   = _rt_preds_val
+_all_val["actual_interceptions"]    = Y_val_it[IT_TARGET].values
+_all_val["predicted_interceptions"] = _it_preds_val
+_all_val["actual_fumbles_lost"]     = Y_val_ft[FT_TARGET].values
+_all_val["predicted_fumbles_lost"]  = _ft_preds_val
+_all_val = _add_fantasy(_all_val)
+_all_val["split"] = "Val2024"
+
+# %%
+# --- BUILD OOF combo (2017-2023) ---
+# Rows ordered identically to the OOF arrays: year-by-year in df_train order
+
+_oof_info = pd.concat([
+    df_train.loc[df_train["season"] == _yr,
+                 ["player_display_name", "week", "attempts", "season"]]
+    .reset_index(drop=True)
+    for _yr in range(2017, TRAIN_END + 1)
+], ignore_index=True)
+
+_all_oof = _oof_info.copy()
+_all_oof["actual_passing_yards"]    = oof_actual
+_all_oof["predicted_passing_yards"] = oof_pred
+_all_oof["actual_passing_tds"]      = td_oof_actual
+_all_oof["predicted_passing_tds"]   = td_oof_pred
+_all_oof["actual_rushing_yards"]    = ry_oof_actual
+_all_oof["predicted_rushing_yards"] = ry_oof_pred
+_all_oof["actual_rushing_tds"]      = rt_oof_actual
+_all_oof["predicted_rushing_tds"]   = rt_oof_pred
+_all_oof["actual_interceptions"]    = it_oof_actual
+_all_oof["predicted_interceptions"] = it_oof_pred
+_all_oof["actual_fumbles_lost"]     = ft_oof_actual
+_all_oof["predicted_fumbles_lost"]  = ft_oof_pred
+_all_oof = _add_fantasy(_all_oof)
+_all_oof["split"] = "OOF"
+
+print(f"\n  OOF rows: {len(_all_oof)}  |  Val rows: {len(_all_val)}  |  Test rows: {len(_all25)}")
+
+# %%
+# --- BUILD combined (OOF + Val + Test) ---
+
+_all_combined = pd.concat(
+    [_all_oof, _all_val[_all_oof.columns.intersection(_all_val.columns)],
+     _all25[_all_oof.columns.intersection(_all25.columns)]],
+    ignore_index=True,
+)
+
+# %%
+# --- PRINT analysis for each split ---
+
+_szn25  = _print_analysis("Test 2025 -- All QBs", _all25)
+_sznval = _print_analysis("Val 2024 -- All QBs",  _all_val)
+_sznoof = _print_analysis("OOF 2017-2023 -- All QBs", _all_oof)
+_szncmb = _print_analysis("Combined (OOF+Val+Test) -- All QBs", _all_combined)
+
+# %%
+# --- SAVE 4 Excel files ---
+
+_game_cols = [
+    "player_display_name", "week", "attempts",
+    "actual_passing_yards",    "predicted_passing_yards",
+    "actual_passing_tds",      "predicted_passing_tds",
+    "actual_rushing_yards",    "predicted_rushing_yards",
+    "actual_rushing_tds",      "predicted_rushing_tds",
+    "actual_interceptions",    "predicted_interceptions",
+    "actual_fumbles_lost",     "predicted_fumbles_lost",
+    "ActualFantasy", "PredictedFantasy", "residual",
+]
+
+for fname, df_game, df_szn in [
+    ("All2025.xlsx",    _all25,    _szn25),
+    ("AllVal2024.xlsx", _all_val,  _sznval),
+    ("AllOOF.xlsx",     _all_oof,  _sznoof),
+]:
+    _path = DATA_DIR / fname
+    _gcols = [c for c in _game_cols if c in df_game.columns]
+    with pd.ExcelWriter(_path, engine="openpyxl") as _w:
+        df_game[_gcols].to_excel(_w, sheet_name="game_level", index=False)
+        df_szn.to_excel(_w, sheet_name="season_totals", index=False)
+    print(f"  Saved: {fname}  ({len(df_game):,} game rows  |  {len(df_szn)} QBs)")
+
+# AllCombined.xlsx gets a split column
+_cmb_game_cols = ["split"] + _game_cols
+_cmb_gcols = [c for c in _cmb_game_cols if c in _all_combined.columns]
+_cmb_path = DATA_DIR / "AllCombined.xlsx"
+with pd.ExcelWriter(_cmb_path, engine="openpyxl") as _w:
+    _all_combined[_cmb_gcols].to_excel(_w, sheet_name="game_level", index=False)
+    _szncmb.to_excel(_w, sheet_name="season_totals", index=False)
+print(f"  Saved: AllCombined.xlsx  ({len(_all_combined):,} game rows  |  {len(_szncmb)} QBs)")
+
+print(f"\nCombined Fantasy Analysis complete.")

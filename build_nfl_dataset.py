@@ -3272,12 +3272,13 @@ qb_rows = master[master['position'] == 'QB'].copy()
 qb_game = (
     qb_rows.groupby(['opponent', 'season', 'week'])
     .agg(
-        _qb_attempts     = ('attempts',     'sum'),
-        _qb_pass_epa     = ('passing_epa',  'sum'),
-        _qb_pass_yards   = ('passing_yards','sum'),
-        _qb_pass_tds     = ('passing_tds',  'sum'),
-        _qb_cpoe_sum     = ('qb_cpoe',      'sum'),    # will divide by games below
-        _qb_cpoe_count   = ('qb_cpoe',      'count'),  # for mean
+        _qb_attempts     = ('attempts',       'sum'),
+        _qb_pass_epa     = ('passing_epa',    'sum'),
+        _qb_pass_yards   = ('passing_yards',  'sum'),
+        _qb_pass_tds     = ('passing_tds',    'sum'),
+        _qb_interceptions= ('interceptions',  'sum'),
+        _qb_cpoe_sum     = ('qb_cpoe',        'sum'),    # will divide by games below
+        _qb_cpoe_count   = ('qb_cpoe',        'count'),  # for mean
     )
     .reset_index()
     .rename(columns={'opponent': 'defteam'})
@@ -3287,6 +3288,7 @@ safe = qb_game['_qb_attempts'].replace(0, float('nan'))
 qb_game['_qb_epa_per_attempt']   = qb_game['_qb_pass_epa']   / safe
 qb_game['_qb_yards_per_attempt'] = qb_game['_qb_pass_yards'] / safe
 qb_game['_qb_td_rate']           = qb_game['_qb_pass_tds']   / safe
+qb_game['_qb_int_rate']          = qb_game['_qb_interceptions'] / safe
 # CPOE: mean across QBs (weighted by count)
 safe_c = qb_game['_qb_cpoe_count'].replace(0, float('nan'))
 qb_game['_qb_cpoe'] = qb_game['_qb_cpoe_sum'] / safe_c
@@ -3386,7 +3388,17 @@ team_rush = (
 safe = team_rush['_team_carries'].replace(0, float('nan'))
 team_rush['_team_epa_per_rush'] = team_rush['_team_rush_epa'] / safe
 
-print(f"  Team composites: {len(team_pass):,} pass rows, {len(team_rush):,} rush rows")
+# fumbles forced: all skill-position fumbles lost against each defense, per game
+team_fumbles = (
+    master[master['position'].isin(['QB', 'RB', 'WR', 'TE'])]
+    .groupby(['opponent', 'season', 'week'])
+    .agg(_team_fumbles_forced=('fumbles_lost_total', 'sum'))
+    .reset_index()
+    .rename(columns={'opponent': 'defteam'})
+)
+
+print(f"  Team composites: {len(team_pass):,} pass rows, {len(team_rush):,} rush rows, "
+      f"{len(team_fumbles):,} fumble rows")
 
 # %%
 # --- Step 14b: Roll allowed stats over prior games ---
@@ -3410,18 +3422,40 @@ def roll_def_frame(df, key_col, rate_cols, windows):
             out_cols[out_col] = True
     return df, list(out_cols.keys())
 
+def ewm_def_frame(df, key_col, rate_cols, spans):
+    """Compute EWM versions of rate_cols over prior games (shift(1), grouped by defteam)."""
+    df = df.sort_values(['defteam', 'season', 'week']).reset_index(drop=True)
+    out_cols = {}
+    for col in rate_cols:
+        if col not in df.columns:
+            continue
+        for s in spans:
+            out_col = f'{key_col}_{col.lstrip("_")}_ewm{s}'
+            df[out_col] = (
+                df.groupby('defteam')[col]
+                .transform(lambda x, s=s: x.shift(1).ewm(span=s, min_periods=1).mean())
+            )
+            out_cols[out_col] = True
+    return df, list(out_cols.keys())
+
+DEF_EWM_SPANS = [5, 10, 20]
+
 # QB defense rolling
-qb_rate_cols = ['_qb_epa_per_attempt', '_qb_yards_per_attempt', '_qb_td_rate', '_qb_cpoe']
+qb_rate_cols = ['_qb_epa_per_attempt', '_qb_yards_per_attempt', '_qb_td_rate', '_qb_int_rate', '_qb_cpoe']
 qb_game, qb_roll_cols = roll_def_frame(
     qb_game, 'opp_def_qb', qb_rate_cols, DEF_WINDOWS
 )
-print(f"  QB defense rolled: {len(qb_roll_cols)} cols")
+qb_game, qb_ewm_cols = ewm_def_frame(
+    qb_game, 'opp_def_qb', ['_qb_int_rate'], DEF_EWM_SPANS
+)
+print(f"  QB defense rolled: {len(qb_roll_cols)} cols + {len(qb_ewm_cols)} EWM cols")
 
 # WR defense rolling
 wr_rate_cols = ['_wr_epa_per_target', '_wr_yards_per_target', '_wr_td_rate', '_wr_catch_rate']
 wr_game, wr_roll_cols = roll_def_frame(
     wr_game, 'opp_def_wr', wr_rate_cols, DEF_WINDOWS
 )
+wr_ewm_cols = []
 print(f"  WR defense rolled: {len(wr_roll_cols)} cols")
 
 # RB defense rolling
@@ -3432,6 +3466,7 @@ rb_rate_cols = [
 rb_game, rb_roll_cols = roll_def_frame(
     rb_game, 'opp_def_rb', rb_rate_cols, DEF_WINDOWS
 )
+rb_ewm_cols = []
 print(f"  RB defense rolled: {len(rb_roll_cols)} cols")
 
 # TE defense rolling
@@ -3439,6 +3474,7 @@ te_rate_cols = ['_te_epa_per_target', '_te_yards_per_target', '_te_td_rate', '_t
 te_game, te_roll_cols = roll_def_frame(
     te_game, 'opp_def_te', te_rate_cols, DEF_WINDOWS
 )
+te_ewm_cols = []
 print(f"  TE defense rolled: {len(te_roll_cols)} cols")
 
 # Team composites rolling
@@ -3448,7 +3484,15 @@ team_pass, pass_roll_cols = roll_def_frame(
 team_rush, rush_roll_cols = roll_def_frame(
     team_rush, 'opp_def_team', ['_team_epa_per_rush'], DEF_WINDOWS
 )
-print(f"  Team composites rolled: {len(pass_roll_cols) + len(rush_roll_cols)} cols")
+team_fumbles, fumble_roll_cols = roll_def_frame(
+    team_fumbles, 'opp_def_team', ['_team_fumbles_forced'], DEF_WINDOWS
+)
+team_fumbles, fumble_ewm_cols = ewm_def_frame(
+    team_fumbles, 'opp_def_team', ['_team_fumbles_forced'], DEF_EWM_SPANS
+)
+n_rolled = len(pass_roll_cols) + len(rush_roll_cols) + len(fumble_roll_cols)
+n_ewm = len(qb_ewm_cols) + len(fumble_ewm_cols)
+print(f"  Team composites rolled: {n_rolled} cols + {n_ewm} EWM cols")
 
 # %%
 # --- Step 14c: Join all allowed rolling stats to master ---
@@ -3458,8 +3502,10 @@ print(f"  Team composites rolled: {len(pass_roll_cols) + len(rush_roll_cols)} co
 print("  Joining allowed stats to master on (opponent, season, week)...")
 
 all_def_roll_cols = (
-    qb_roll_cols + wr_roll_cols + rb_roll_cols +
-    te_roll_cols + pass_roll_cols + rush_roll_cols
+    qb_roll_cols + qb_ewm_cols +
+    wr_roll_cols + rb_roll_cols + te_roll_cols +
+    pass_roll_cols + rush_roll_cols +
+    fumble_roll_cols + fumble_ewm_cols
 )
 
 # Drop any stale columns from a prior run
@@ -3467,12 +3513,13 @@ master.drop(columns=[c for c in all_def_roll_cols if c in master.columns],
             errors='ignore', inplace=True)
 
 for frame, roll_cols in [
-    (qb_game,   qb_roll_cols),
-    (wr_game,   wr_roll_cols),
-    (rb_game,   rb_roll_cols),
-    (te_game,   te_roll_cols),
-    (team_pass, pass_roll_cols),
-    (team_rush, rush_roll_cols),
+    (qb_game,      qb_roll_cols + qb_ewm_cols),
+    (wr_game,      wr_roll_cols),
+    (rb_game,      rb_roll_cols),
+    (te_game,      te_roll_cols),
+    (team_pass,    pass_roll_cols),
+    (team_rush,    rush_roll_cols),
+    (team_fumbles, fumble_roll_cols + fumble_ewm_cols),
 ]:
     join_df = frame[['defteam', 'season', 'week'] + roll_cols].rename(
         columns={'defteam': 'opponent'}
@@ -3487,12 +3534,14 @@ print(f"  Master shape: {master.shape}")
 sample_def_cols = [
     'opp_def_qb_qb_epa_per_attempt_L5',
     'opp_def_qb_qb_cpoe_L5',
+    'opp_def_qb_qb_int_rate_L5',
     'opp_def_wr_wr_epa_per_target_L5',
     'opp_def_wr_wr_catch_rate_L5',
     'opp_def_rb_rb_rush_epa_per_carry_L5',
     'opp_def_te_te_epa_per_target_L5',
     'opp_def_team_team_epa_per_pass_L5',
     'opp_def_team_team_epa_per_rush_L5',
+    'opp_def_team_team_fumbles_forced_L5',
 ]
 print(f"\n  Null rates on sample Step 14 cols:")
 for col in sample_def_cols:
